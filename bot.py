@@ -3,6 +3,7 @@ import random
 import time
 import sqlite3
 import asyncio
+import os
 from datetime import datetime, timedelta
 from telegram import (
     Update,
@@ -32,8 +33,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Настройки бота
-TOKEN = "YOUR_BOT_TOKEN"
-COINGATE_API_TOKEN = "YOUR_COINGATE_API_TOKEN"
+TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
+COINGATE_API_TOKEN = os.getenv("COINGATE_API_TOKEN", "YOUR_COINGATE_API_TOKEN")
 COINGATE_API_URL = "https://api.coingate.com/api/v2/orders"
 
 # Состояния разговора

@@ -195,7 +195,7 @@ TEXTS = {
         'payment_instructions': (
             "Оплатите {amount} {currency} по адресу:\n"
             "`{payment_address}`\n\n"
-            "У вас есть 30 минут для оплаты. После оплаты товар будет выслан автоматически."
+            "У вас есть 30 минут для оплата. После оплаты товар будет выслан автоматически."
         ),
         'payment_timeout': 'Время оплаты истекло. Заказ отменен.',
         'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
@@ -843,17 +843,32 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.warning('Update "%s" caused error "%s"', update, context.error)
     
+    # Добавляем проверку на None
+    if update is None:
+        logger.error("Update is None, cannot process error")
+        return
+    
     try:
         user = update.message.from_user
         user_data = get_user(user.id)
         lang = user_data[3] or 'ru'
         await update.message.reply_text(get_text(lang, 'error'))
     except:
-        await update.message.reply_text("Произошла ошибка. Попробуйте позже.")
+        try:
+            # Добавляем проверку на наличие сообщения
+            if update and update.message:
+                await update.message.reply_text("Произошла ошибка. Попробуйте позже.")
+            else:
+                logger.error("Cannot send error message: update or update.message is None")
+        except Exception as e:
+            logger.error(f"Failed to send error message: {e}")
 
 def main():
     # Создаем Application и передаем ему токен бота
     application = Application.builder().token(TOKEN).build()
+    
+    # Очищаем предыдущие вебхуки
+    asyncio.run(application.bot.delete_webhook())
     
     # Определяем обработчик разговоров
     conv_handler = ConversationHandler(
@@ -882,7 +897,7 @@ def main():
     Thread(target=check_pending_transactions, args=(application,), daemon=True).start()
     
     # Запускаем бота
-    application.run_polling()
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()

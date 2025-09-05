@@ -168,7 +168,7 @@ init_db()
 TEXTS = {
     'ru': {
         'welcome': 'Добро пожаловать!',
-        'captcha': 'Для входа решите каптчу: {}\nВведите 5 цифр:',
+        'captcha': 'Для входа решите каптчу: {code}\nВведите 5 цифр:',
         'captcha_failed': 'Неверная каптча! Попробуйте снова:',
         'language_selected': 'Язык установлен: Русский',
         'main_menu': (
@@ -211,7 +211,7 @@ TEXTS = {
     },
     'en': {
         'welcome': 'Welcome!',
-        'captcha': 'To enter, solve the captcha: {}\nEnter 5 digits:',
+        'captcha': 'To enter, solve the captcha: {code}\nEnter 5 digits:',
         'captcha_failed': 'Invalid captcha! Try again:',
         'language_selected': 'Language set: English',
         'main_menu': (
@@ -254,7 +254,7 @@ TEXTS = {
     },
     'ka': {
         'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
-        'captcha': 'შესასვლელად გადაწყვიტეთ captcha: {}\nშეიყვანეთ 5 ციფრი:',
+        'captcha': 'შესასვლელად გადაწყვიტეთ captcha: {code}\nშეიყვანეთ 5 ციფრი:',
         'captcha_failed': 'არასწორი captcha! სცადეთ თავიდან:',
         'language_selected': 'ენა დაყენებულია: ქართული',
         'main_menu': (
@@ -325,18 +325,30 @@ DELIVERY_TYPES = ['Подъезд', 'Прикоп', 'Магнит', 'Во дво
 
 # Функция для получения текста на нужном языке
 def get_text(lang, key, **kwargs):
+    if lang not in TEXTS:
+        lang = 'ru'
+    if key not in TEXTS[lang]:
+        return f"Текст не найден: {key}"
+    
     text = TEXTS[lang][key]
-    if kwargs:
-        text = text.format(**kwargs)
-    return text
+    try:
+        if kwargs:
+            text = text.format(**kwargs)
+        return text
+    except KeyError as e:
+        logger.error(f"Ошибка форматирования текста: {e}, ключ: {key}, аргументы: {kwargs}")
+        return text
 
 # Функция для проверки бана пользователя
 def is_banned(user_id):
     user = get_user(user_id)
     if user and user[5]:  # ban_until
-        ban_until = datetime.strptime(user[5], '%Y-%m-%d %H:%M:%S')
-        if ban_until > datetime.now():
-            return True
+        try:
+            ban_until = datetime.strptime(user[5], '%Y-%m-%d %H:%M:%S')
+            if ban_until > datetime.now():
+                return True
+        except ValueError:
+            return False
     return False
 
 # Функция для создания платежа через CoinGate
@@ -489,10 +501,13 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 async def show_main_menu(update, context, user_id, lang):
     user = get_user(user_id)
+    if not user:
+        return
+    
     text = get_text(
         lang, 
         'main_menu', 
-        name=user[2],  # first_name
+        name=user[2] or 'N/A',  # first_name
         username=user[1] or 'N/A',  # username
         purchases=user[7] or 0,  # purchase_count
         discount=user[8] or 0,  # discount

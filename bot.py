@@ -207,8 +207,7 @@ TEXTS = {
             "Оплатите {amount} {currency} по адресу:\n"
             "`{payment_address}`\n\n"
             "Или отсканируйте QR-код:\n"
-            "![QR Code]({qr_code})\n\n"
-            "У вас есть 60 минут для оплаты. После оплаты товар будет выслан автоматически."
+            "После оплаты товар будет выслан автоматически."
         ),
         'payment_timeout': 'Время оплаты истекло. Заказ отменен.',
         'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
@@ -255,8 +254,7 @@ TEXTS = {
             "Pay {amount} {currency} to address:\n"
             "`{payment_address}`\n\n"
             "Or scan QR-code:\n"
-            "![QR Code]({qr_code})\n\n"
-            "You have 60 minutes to pay. After payment, the product will be sent automatically."
+            "After payment, the product will be sent automatically."
         ),
         'payment_timeout': 'Payment time has expired. Order canceled.',
         'payment_success': 'Payment received! Your product:\n\n{product_image}',
@@ -303,8 +301,7 @@ TEXTS = {
             "გადაიხადეთ {amount} {currency} მისამართზე:\n"
             "`{payment_address}`\n\n"
             "ან სკანირება QR-კოდი:\n"
-            "![QR Code]({qr_code})\n\n"
-            "გადახდისთვის გაქვთ 60 წუთი. გადახდის შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად."
+            "გადახდის შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად."
         ),
         'payment_timeout': 'გადახდის დრო ამოიწურა. შეკვეთა გაუქმებულია.',
         'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
@@ -958,14 +955,17 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
     
     # Создаем заказ в CryptoCloud
     order_id = f"order_{int(time.time())}_{user_id}"
-    invoice = create_cryptocloud_invoice(price, crypto_currency, order_id)
+    
+    # Конвертируем цену в USD (если нужно)
+    # price_usd = price / USD_TO_GEL_RATE  # если используется конвертация
+    price_usd = price  # если цена уже в USD
+    
+    invoice = create_cryptocloud_invoice(price_usd, crypto_currency, order_id)
     
     if invoice and invoice.get('status') == 'success':
         invoice_uuid = invoice['result']['uuid']
         payment_url = invoice['result']['link']
-        
-        # Получаем QR-код (если доступен)
-        qr_code = invoice['result'].get('qr_code', payment_url)
+        qr_code = invoice['result'].get('qr_code', '')  # Получаем QR-код
         
         expires_at = datetime.now() + timedelta(minutes=60)
         add_transaction(
@@ -979,6 +979,7 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
             invoice_uuid
         )
         
+        # Формируем текст с QR-кодом
         payment_text = get_text(
             lang,
             'payment_instructions',
@@ -988,14 +989,32 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
             qr_code=qr_code
         )
         
-        message = await context.bot.send_message(
-            chat_id=user_id,
-            text=payment_text,
-            parse_mode='Markdown'
-        )
-        context.user_data['last_message_id'] = message.message_id
+        # Отправляем сообщение с QR-кодом
+        if qr_code:
+            try:
+                # Сначала отправляем изображение QR-кода
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=qr_code,
+                    caption=payment_text,
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Error sending QR code: {e}")
+                # Если не удалось отправить изображение, отправляем текст
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=payment_text,
+                    parse_mode='Markdown'
+                )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=payment_text,
+                parse_mode='Markdown'
+            )
         
-        # Запускаем проверку оплаты в фоновом режиме
+        # Запускаем проверку оплаты
         context.job_queue.run_repeating(
             check_payment,
             interval=60,
@@ -1012,6 +1031,11 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
         
         return PAYMENT
     else:
+        error_msg = "Ошибка при создании инвойса"
+        if invoice:
+            error_msg += f": {invoice.get('error', 'Unknown error')}"
+        logger.error(error_msg)
+        
         message = await context.bot.send_message(
             chat_id=user_id,
             text=get_text(lang, 'error')

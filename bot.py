@@ -1,7 +1,6 @@
 import logging
 import random
 import time
-import sqlite3
 import asyncio
 import os
 from datetime import datetime, timedelta
@@ -22,6 +21,8 @@ from telegram.ext import (
     ContextTypes
 )
 import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from threading import Thread
 
 # Настройки логирования
@@ -35,19 +36,20 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 COINGATE_API_TOKEN = os.getenv("COINGATE_API_TOKEN", "YOUR_COINGATE_API_TOKEN")
 COINGATE_API_URL = "https://api.coingate.com/api/v2/orders"
+DATABASE_URL = os.environ['DATABASE_URL']
 
 # Состояния разговора
 CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, PAYMENT, BALANCE = range(10)
 
 # Инициализация базы данных
 def init_db():
-    conn = sqlite3.connect('bot_database.db')
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cursor = conn.cursor()
     
     # Таблица пользователей
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
+        user_id BIGINT PRIMARY KEY,
         username TEXT,
         first_name TEXT,
         language TEXT DEFAULT 'ru',
@@ -64,8 +66,8 @@ def init_db():
     # Таблица транзакций
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
         amount REAL,
         currency TEXT,
         status TEXT,
@@ -81,8 +83,8 @@ def init_db():
     # Таблица покупок
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS purchases (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
         product TEXT,
         price REAL,
         district TEXT,
@@ -98,65 +100,65 @@ def init_db():
 
 # Функции для работы с базой данных
 def get_user(user_id):
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
     user = cursor.fetchone()
     conn.close()
     return user
 
 def update_user(user_id, **kwargs):
-    conn = sqlite3.connect('bot_database.db')
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cursor = conn.cursor()
     
     for key, value in kwargs.items():
-        cursor.execute(f'UPDATE users SET {key} = ? WHERE user_id = ?', (value, user_id))
+        cursor.execute(f'UPDATE users SET {key} = %s WHERE user_id = %s', (value, user_id))
     
     conn.commit()
     conn.close()
 
 def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info):
-    conn = sqlite3.connect('bot_database.db')
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cursor = conn.cursor()
     
     cursor.execute('''
     INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     ''', (user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info))
     
     conn.commit()
     conn.close()
 
 def add_purchase(user_id, product, price, district, delivery_type):
-    conn = sqlite3.connect('bot_database.db')
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cursor = conn.cursor()
     
     cursor.execute('''
     INSERT INTO purchases (user_id, product, price, district, delivery_type)
-    VALUES (?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s)
     ''', (user_id, product, price, district, delivery_type))
     
     # Обновляем счетчик покупок
-    cursor.execute('SELECT purchase_count FROM users WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT purchase_count FROM users WHERE user_id = %s', (user_id,))
     result = cursor.fetchone()
     purchase_count = result[0] + 1 if result else 1
-    cursor.execute('UPDATE users SET purchase_count = ? WHERE user_id = ?', (purchase_count, user_id))
+    cursor.execute('UPDATE users SET purchase_count = %s WHERE user_id = %s', (purchase_count, user_id))
     
     conn.commit()
     conn.close()
 
 def get_pending_transactions():
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM transactions WHERE status = "pending" AND expires_at > datetime("now")')
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute('SELECT * FROM transactions WHERE status = %s AND expires_at > NOW()', ('pending',))
     transactions = cursor.fetchall()
     conn.close()
     return transactions
 
 def update_transaction_status(order_id, status):
-    conn = sqlite3.connect('bot_database.db')
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cursor = conn.cursor()
-    cursor.execute('UPDATE transactions SET status = ? WHERE order_id = ?', (status, order_id))
+    cursor.execute('UPDATE transactions SET status = %s WHERE order_id = %s', (status, order_id))
     conn.commit()
     conn.close()
 
@@ -355,9 +357,11 @@ def get_text(lang, key, **kwargs):
 # Функция для проверки бана пользователя
 def is_banned(user_id):
     user = get_user(user_id)
-    if user and user[5]:  # ban_until
+    if user and user['ban_until']:
         try:
-            ban_until = datetime.strptime(user[5], '%Y-%m-%d %H:%M:%S')
+            ban_until = user['ban_until']
+            if isinstance(ban_until, str):
+                ban_until = datetime.strptime(ban_until, '%Y-%m-%d %H:%M:%S')
             if ban_until > datetime.now():
                 return True
         except ValueError:
@@ -406,9 +410,9 @@ def check_payment_status(order_id):
 
 # Функция для получения последнего заказа пользователя
 def get_last_order(user_id):
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM purchases WHERE user_id = ? ORDER BY purchase_time DESC LIMIT 1', (user_id,))
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute('SELECT * FROM purchases WHERE user_id = %s ORDER BY purchase_time DESC LIMIT 1', (user_id,))
     order = cursor.fetchone()
     conn.close()
     return order
@@ -419,7 +423,7 @@ def check_pending_transactions(app):
         try:
             transactions = get_pending_transactions()
             for transaction in transactions:
-                order_id = transaction[5]
+                order_id = transaction['order_id']
                 status_info = check_payment_status(order_id)
                 
                 if status_info:
@@ -427,8 +431,8 @@ def check_pending_transactions(app):
                     if status == 'paid':
                         update_transaction_status(order_id, 'paid')
                         
-                        user_id = transaction[1]
-                        product_info = transaction[8]
+                        user_id = transaction['user_id']
+                        product_info = transaction['product_info']
                         
                         asyncio.run_coroutine_threadsafe(
                             app.bot.send_message(
@@ -464,8 +468,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
     existing_user = get_user(user_id)
     if existing_user:
-        if existing_user[4]:
-            lang = existing_user[3] or 'ru'
+        if existing_user['captcha_passed']:
+            lang = existing_user['language'] or 'ru'
             await update.message.reply_text(get_text(lang, 'welcome'))
             await show_main_menu(update, context, user_id, lang)
             return MAIN_MENU
@@ -483,11 +487,11 @@ async def check_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     user = update.message.from_user
     
     if user_input == context.user_data.get('captcha'):
-        conn = sqlite3.connect('bot_database.db')
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cursor = conn.cursor()
         cursor.execute(
-            'INSERT OR IGNORE INTO users (user_id, username, first_name, captcha_passed) VALUES (?, ?, ?, ?)',
-            (user.id, user.username, user.first_name, 1)
+            'INSERT INTO users (user_id, username, first_name, captcha_passed) VALUES (%s, %s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET captcha_passed = %s',
+            (user.id, user.username, user.first_name, 1, 1)
         )
         conn.commit()
         conn.close()
@@ -529,11 +533,11 @@ async def show_main_menu(update, context, user_id, lang):
     user_info_text = get_text(
         lang, 
         'main_menu', 
-        name=user[2] or 'N/A',
-        username=user[1] or 'N/A',
-        purchases=user[7] or 0,
-        discount=user[8] or 0,
-        balance=user[9] or 0
+        name=user['first_name'] or 'N/A',
+        username=user['username'] or 'N/A',
+        purchases=user['purchase_count'] or 0,
+        discount=user['discount'] or 0,
+        balance=user['balance'] or 0
     )
     
     # Полное сообщение с описанием магазина и информацией пользователя
@@ -546,7 +550,7 @@ async def show_main_menu(update, context, user_id, lang):
         [InlineKeyboardButton("Кутаиси", callback_data="city_Кутаиси")],
         [InlineKeyboardButton("Батуми", callback_data="city_Батуми")],
         [
-            InlineKeyboardButton(f"💰 Баланс: {user[9] or 0} лари", callback_data="balance"),
+            InlineKeyboardButton(f"💰 Баланс: {user['balance'] or 0} лари", callback_data="balance"),
             InlineKeyboardButton("📦 Последний заказ", callback_data="last_order")
         ],
         [
@@ -587,7 +591,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     user_id = query.from_user.id
     user_data = get_user(user_id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     data = query.data
     
     # Удаляем предыдущее сообщение с меню
@@ -620,12 +624,12 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         last_order = get_last_order(user_id)
         if last_order:
             order_text = (
-                f"📦 Товар: {last_order[2]}\n"
-                f"💵 Стоимость: {last_order[3]} лари\n"
-                f"🏙 Район: {last_order[4]}\n"
-                f"🚚 Тип доставки: {last_order[5]}\n"
-                f"🕐 Время заказа: {last_order[6]}\n"
-                f"📊 Статус: {last_order[7]}"
+                f"📦 Товар: {last_order['product']}\n"
+                f"💵 Стоимость: {last_order['price']} лари\n"
+                f"🏙 Район: {last_order['district']}\n"
+                f"🚚 Тип доставки: {last_order['delivery_type']}\n"
+                f"🕐 Время заказа: {last_order['purchase_time']}\n"
+                f"📊 Статус: {last_order['status']}"
             )
             message = await context.bot.send_message(
                 chat_id=user_id,
@@ -699,7 +703,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     user_id = query.from_user.id
     user_data = get_user(user_id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     data = query.data
     
     # Удаляем предыдущее сообщение
@@ -743,7 +747,7 @@ async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     user_id = query.from_user.id
     user_data = get_user(user_id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     data = query.data
     
     # Удаляем предыдущее сообщение
@@ -795,7 +799,7 @@ async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     user_id = query.from_user.id
     user_data = get_user(user_id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     data = query.data
     
     # Удаляем предыдущее сообщение
@@ -864,7 +868,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     user_id = query.from_user.id
     user_data = get_user(user_id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     data = query.data
     
     # Удаляем предыдущее сообщение
@@ -979,7 +983,7 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
         )
         
         user = get_user(user_id)
-        failed_payments = user[6] + 1
+        failed_payments = user['failed_payments'] + 1
         update_user(user_id, failed_payments=failed_payments)
         
         if failed_payments >= 3:
@@ -995,7 +999,7 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
 async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
     user_data = get_user(user.id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     amount_text = update.message.text
     
     try:
@@ -1004,7 +1008,7 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(get_text(lang, 'error'))
             return BALANCE
         
-        current_balance = user_data[9] or 0
+        current_balance = user_data['balance'] or 0
         new_balance = current_balance + amount
         update_user(user.id, balance=new_balance)
         
@@ -1021,14 +1025,14 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.message.from_user.id
     user_data = get_user(user_id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     await show_main_menu(update, context, user_id, lang)
     return MAIN_MENU
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.message.from_user.id
     user_data = get_user(user_id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     text = update.message.text
     
     # Если текст является числом - пополняем баланс
@@ -1043,7 +1047,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
     user_data = get_user(user.id)
-    lang = user_data[3] or 'ru'
+    lang = user_data['language'] or 'ru'
     
     await update.message.reply_text("Операция отменена.")
     return ConversationHandler.END
@@ -1077,7 +1081,7 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         user_data = get_user(user.id) if user else None
-        lang = user_data[3] or 'ru' if user_data else 'ru'
+        lang = user_data['language'] or 'ru' if user_data else 'ru'
         
         await context.bot.send_message(
             chat_id=chat_id,

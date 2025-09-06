@@ -205,7 +205,8 @@ TEXTS = {
         'rules': 'Правила:\n1. Не сообщайте никому данные о заказе\n2. Оплата только в течение 30 минут\n3. При нарушении правил - бан',
         'reviews': 'Наши отзывы: @reviews_channel',
         'error': 'Произошла ошибка. Попробуйте позже.',
-        'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.'
+        'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.',
+        'back': '⬅️ Назад'
     },
     'en': {
         'welcome': 'Welcome!',
@@ -248,7 +249,8 @@ TEXTS = {
         'rules': 'Rules:\n1. Do not share order information with anyone\n2. Payment only within 30 minutes\n3. Ban for breaking the rules',
         'reviews': 'Our reviews: @reviews_channel',
         'error': 'An error occurred. Please try again later.',
-        'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.'
+        'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.',
+        'back': '⬅️ Back'
     },
     'ka': {
         'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
@@ -291,7 +293,8 @@ TEXTS = {
         'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 30 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
         'reviews': 'ჩვენი მიმოხილვები: @reviews_channel',
         'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
-        'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.'
+        'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.',
+        'back': '⬅️ უკან'
     }
 }
 
@@ -483,34 +486,7 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.answer()
     await query.edit_message_text(text=get_text(lang_code, 'language_selected'))
     
-    # Показываем главное меню, редактируя текущее сообщение
-    user = get_user(user_id)
-    text = get_text(
-        lang_code, 
-        'main_menu', 
-        name=user[2] or 'N/A',
-        username=user[1] or 'N/A',
-        purchases=user[7] or 0,
-        discount=user[8] or 0,
-        balance=user[9] or 0
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("🛒 Купить", callback_data="buy")],
-        [InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance")],
-        [InlineKeyboardButton("🎁 Бонусы", callback_data="bonuses")],
-        [InlineKeyboardButton("📚 Правила", callback_data="rules")],
-        [InlineKeyboardButton("👨‍💻 Оператор", callback_data="operator")],
-        [InlineKeyboardButton("🔧 Техподдержка", callback_data="support")],
-        [InlineKeyboardButton("📢 Наш канал", callback_data="channel")],
-        [InlineKeyboardButton("⭐ Отзывы", callback_data="reviews")],
-        [InlineKeyboardButton("🌐 Наш сайт", callback_data="website")],
-        [InlineKeyboardButton("🤖 Личный бот", callback_data="personal_bot")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.reply_text(text=text, reply_markup=reply_markup)
-    
+    await show_main_menu(update, context, user_id, lang_code)
     return MAIN_MENU
 
 async def show_main_menu(update, context, user_id, lang):
@@ -529,7 +505,9 @@ async def show_main_menu(update, context, user_id, lang):
     )
     
     keyboard = [
-        [InlineKeyboardButton("🛒 Купить", callback_data="buy")],
+        [InlineKeyboardButton(city, callback_data=f"city_{city}")] for city in PRODUCTS.keys()
+    ]
+    keyboard.extend([
         [InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance")],
         [InlineKeyboardButton("🎁 Бонусы", callback_data="bonuses")],
         [InlineKeyboardButton("📚 Правила", callback_data="rules")],
@@ -539,16 +517,18 @@ async def show_main_menu(update, context, user_id, lang):
         [InlineKeyboardButton("⭐ Отзывы", callback_data="reviews")],
         [InlineKeyboardButton("🌐 Наш сайт", callback_data="website")],
         [InlineKeyboardButton("🤖 Личный бот", callback_data="personal_bot")]
-    ]
+    ])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Отправляем новое сообщение с главным меню
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=text,
-        reply_markup=reply_markup
-    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup)
+    else:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=text,
+            reply_markup=reply_markup
+        )
 
 async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -559,14 +539,19 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lang = user_data[3] or 'ru'
     data = query.data
     
-    if data == 'buy':
-        keyboard = [[InlineKeyboardButton(city, callback_data=f"city_{city}")] for city in PRODUCTS.keys()]
+    if data.startswith('city_'):
+        city = data.replace('city_', '')
+        context.user_data['city'] = city
+        
+        keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in PRODUCTS[city].keys()]
+        keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_main")])
         reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await query.edit_message_text(
-            get_text(lang, 'select_city'),
+            get_text(lang, 'select_category'),
             reply_markup=reply_markup
         )
-        return CITY
+        return CATEGORY
     elif data == 'balance':
         await query.edit_message_text(get_text(lang, 'balance_add'))
         return BALANCE
@@ -591,32 +576,11 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == 'personal_bot':
         await query.edit_message_text("https://t.me/your_bot")
         return MAIN_MENU
+    elif data == 'back_to_main':
+        await show_main_menu(update, context, user_id, lang)
+        return MAIN_MENU
     
     return MAIN_MENU
-
-async def handle_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    user_data = get_user(user_id)
-    lang = user_data[3] or 'ru'
-    city = query.data.replace('city_', '')
-    
-    if city not in PRODUCTS:
-        await query.edit_message_text(get_text(lang, 'error'))
-        return CITY
-    
-    context.user_data['city'] = city
-    
-    keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in PRODUCTS[city].keys()]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        get_text(lang, 'select_category'),
-        reply_markup=reply_markup
-    )
-    return CATEGORY
 
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -625,7 +589,13 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = query.from_user.id
     user_data = get_user(user_id)
     lang = user_data[3] or 'ru'
-    category = query.data.replace('cat_', '')
+    data = query.data
+    
+    if data == 'back_to_main':
+        await show_main_menu(update, context, user_id, lang)
+        return MAIN_MENU
+    
+    category = data.replace('cat_', '')
     city = context.user_data.get('city')
     
     if city not in PRODUCTS or category not in PRODUCTS[city]:
@@ -637,6 +607,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     districts = DISTRICTS.get(city, [])
     keyboard = [[InlineKeyboardButton(district, callback_data=f"dist_{district}")] for district in districts]
+    keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_category")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
@@ -652,7 +623,21 @@ async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = query.from_user.id
     user_data = get_user(user_id)
     lang = user_data[3] or 'ru'
-    district = query.data.replace('dist_', '')
+    data = query.data
+    
+    if data == 'back_to_category':
+        city = context.user_data.get('city')
+        keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in PRODUCTS[city].keys()]
+        keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_main")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            get_text(lang, 'select_category'),
+            reply_markup=reply_markup
+        )
+        return CATEGORY
+    
+    district = data.replace('dist_', '')
     city = context.user_data.get('city')
     
     if city not in DISTRICTS or district not in DISTRICTS[city]:
@@ -662,6 +647,7 @@ async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data['district'] = district
     
     keyboard = [[InlineKeyboardButton(del_type, callback_data=f"del_{del_type}")] for del_type in DELIVERY_TYPES]
+    keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_district")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
@@ -677,7 +663,22 @@ async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = query.from_user.id
     user_data = get_user(user_id)
     lang = user_data[3] or 'ru'
-    delivery_type = query.data.replace('del_', '')
+    data = query.data
+    
+    if data == 'back_to_district':
+        city = context.user_data.get('city')
+        districts = DISTRICTS.get(city, [])
+        keyboard = [[InlineKeyboardButton(district, callback_data=f"dist_{district}")] for district in districts]
+        keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_category")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            get_text(lang, 'select_district'),
+            reply_markup=reply_markup
+        )
+        return DISTRICT
+    
+    delivery_type = data.replace('del_', '')
     
     if delivery_type not in DELIVERY_TYPES:
         await query.edit_message_text(get_text(lang, 'error'))
@@ -701,7 +702,8 @@ async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     keyboard = [
         [InlineKeyboardButton("✅ Да", callback_data="confirm_yes")],
-        [InlineKeyboardButton("❌ Нет", callback_data="confirm_no")]
+        [InlineKeyboardButton("❌ Нет", callback_data="confirm_no")],
+        [InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_delivery")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -718,9 +720,20 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = query.from_user.id
     user_data = get_user(user_id)
     lang = user_data[3] or 'ru'
-    confirmation = query.data
+    data = query.data
     
-    if confirmation == 'confirm_yes':
+    if data == 'back_to_delivery':
+        keyboard = [[InlineKeyboardButton(del_type, callback_data=f"del_{del_type}")] for del_type in DELIVERY_TYPES]
+        keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_district")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            get_text(lang, 'select_delivery'),
+            reply_markup=reply_markup
+        )
+        return DELIVERY
+    
+    if data == 'confirm_yes':
         city = context.user_data.get('city')
         category = context.user_data.get('category')
         price = context.user_data.get('price')
@@ -848,6 +861,28 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(get_text(lang, 'error'))
         return BALANCE
 
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.message.from_user.id
+    user_data = get_user(user_id)
+    lang = user_data[3] or 'ru'
+    await show_main_menu(update, context, user_id, lang)
+    return MAIN_MENU
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.message.from_user.id
+    user_data = get_user(user_id)
+    lang = user_data[3] or 'ru'
+    text = update.message.text
+    
+    # Если текст является числом - пополняем баланс
+    if text.isdigit():
+        context.user_data['balance_amount'] = float(text)
+        return await handle_balance(update, context)
+    else:
+        # Любой другой текст возвращает в главное меню
+        await show_main_menu(update, context, user_id, lang)
+        return MAIN_MENU
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
     user_data = get_user(user.id)
@@ -898,22 +933,24 @@ def main():
     application = Application.builder().token(TOKEN).build()
     
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[CommandHandler('start', start), CommandHandler('menu', menu_command)],
         states={
             CAPTCHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_captcha)],
             LANGUAGE: [CallbackQueryHandler(set_language)],
             MAIN_MENU: [CallbackQueryHandler(handle_main_menu)],
-            CITY: [CallbackQueryHandler(handle_city)],
+            CITY: [CallbackQueryHandler(handle_main_menu)],
             CATEGORY: [CallbackQueryHandler(handle_category)],
             DISTRICT: [CallbackQueryHandler(handle_district)],
             DELIVERY: [CallbackQueryHandler(handle_delivery)],
             CONFIRMATION: [CallbackQueryHandler(handle_confirmation)],
             BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_balance)],
+            PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     
     application.add_handler(conv_handler)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error)
     
     Thread(target=check_pending_transactions, args=(application,), daemon=True).start()

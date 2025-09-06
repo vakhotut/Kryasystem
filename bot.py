@@ -446,6 +446,13 @@ def check_pending_transactions(app):
             logger.error(f"Error in check_pending_transactions: {e}")
             time.sleep(60)
 
+# Вспомогательная функция для удаления предыдущего сообщения
+async def delete_previous_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
+
 # Обработчики команд и состояний
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
@@ -559,31 +566,20 @@ async def show_main_menu(update, context, user_id, lang):
     # URL изображения
     image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
     
-    if update.callback_query:
-        try:
-            # Пытаемся отредактировать сообщение с изображением
-            await update.callback_query.edit_message_media(
-                media=InputMediaPhoto(media=image_url, caption=full_text),
-                reply_markup=reply_markup
-            )
-        except:
-            # Если не получается отредактировать (например, было текстовое сообщение),
-            # удаляем старое и отправляем новое с изображением
-            await update.callback_query.delete_message()
-            await context.bot.send_photo(
-                chat_id=user_id,
-                photo=image_url,
-                caption=full_text,
-                reply_markup=reply_markup
-            )
-    else:
-        # Отправляем новое сообщение с изображением
-        await context.bot.send_photo(
-            chat_id=user_id,
-            photo=image_url,
-            caption=full_text,
-            reply_markup=reply_markup
-        )
+    # Удаляем предыдущее сообщение, если есть
+    if 'last_message_id' in context.user_data:
+        await delete_previous_message(context, user_id, context.user_data['last_message_id'])
+    
+    # Отправляем новое сообщение с фото
+    message = await context.bot.send_photo(
+        chat_id=user_id,
+        photo=image_url,
+        caption=full_text,
+        reply_markup=reply_markup
+    )
+    
+    # Сохраняем ID сообщения для возможного удаления в будущем
+    context.user_data['last_message_id'] = message.message_id
 
 async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -594,6 +590,10 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lang = user_data[3] or 'ru'
     data = query.data
     
+    # Удаляем предыдущее сообщение с меню
+    if 'last_message_id' in context.user_data:
+        await delete_previous_message(context, user_id, context.user_data['last_message_id'])
+    
     if data.startswith('city_'):
         city = data.replace('city_', '')
         context.user_data['city'] = city
@@ -602,13 +602,19 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_main")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
-            get_text(lang, 'select_category'),
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'select_category'),
             reply_markup=reply_markup
         )
+        context.user_data['last_message_id'] = message.message_id
         return CATEGORY
     elif data == 'balance':
-        await query.edit_message_text(get_text(lang, 'balance_add'))
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'balance_add')
+        )
+        context.user_data['last_message_id'] = message.message_id
         return BALANCE
     elif data == 'last_order':
         last_order = get_last_order(user_id)
@@ -621,30 +627,65 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"🕐 Время заказа: {last_order[6]}\n"
                 f"📊 Статус: {last_order[7]}"
             )
-            await query.edit_message_text(order_text)
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=order_text
+            )
         else:
-            await query.edit_message_text(get_text(lang, 'no_orders'))
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=get_text(lang, 'no_orders')
+            )
+        context.user_data['last_message_id'] = message.message_id
         return MAIN_MENU
     elif data == 'bonuses':
-        await query.edit_message_text(get_text(lang, 'bonuses'))
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'bonuses')
+        )
+        context.user_data['last_message_id'] = message.message_id
         return MAIN_MENU
     elif data == 'rules':
-        await query.edit_message_text(get_text(lang, 'rules'))
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'rules')
+        )
+        context.user_data['last_message_id'] = message.message_id
         return MAIN_MENU
     elif data == 'operator' or data == 'support':
-        await query.edit_message_text(get_text(lang, 'support'))
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'support')
+        )
+        context.user_data['last_message_id'] = message.message_id
         return MAIN_MENU
     elif data == 'channel':
-        await query.edit_message_text("https://t.me/your_channel")
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text="https://t.me/your_channel"
+        )
+        context.user_data['last_message_id'] = message.message_id
         return MAIN_MENU
     elif data == 'reviews':
-        await query.edit_message_text(get_text(lang, 'reviews'))
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'reviews')
+        )
+        context.user_data['last_message_id'] = message.message_id
         return MAIN_MENU
     elif data == 'website':
-        await query.edit_message_text("https://yourwebsite.com")
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text="https://yourwebsite.com"
+        )
+        context.user_data['last_message_id'] = message.message_id
         return MAIN_MENU
     elif data == 'personal_bot':
-        await query.edit_message_text("https://t.me/your_bot")
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text="https://t.me/your_bot"
+        )
+        context.user_data['last_message_id'] = message.message_id
         return MAIN_MENU
     elif data == 'back_to_main':
         await show_main_menu(update, context, user_id, lang)
@@ -661,6 +702,10 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     lang = user_data[3] or 'ru'
     data = query.data
     
+    # Удаляем предыдущее сообщение
+    if 'last_message_id' in context.user_data:
+        await delete_previous_message(context, user_id, context.user_data['last_message_id'])
+    
     if data == 'back_to_main':
         await show_main_menu(update, context, user_id, lang)
         return MAIN_MENU
@@ -669,7 +714,11 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     city = context.user_data.get('city')
     
     if city not in PRODUCTS or category not in PRODUCTS[city]:
-        await query.edit_message_text(get_text(lang, 'error'))
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'error')
+        )
+        context.user_data['last_message_id'] = message.message_id
         return CATEGORY
     
     context.user_data['category'] = category
@@ -680,10 +729,12 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_category")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        get_text(lang, 'select_district'),
+    message = await context.bot.send_message(
+        chat_id=user_id,
+        text=get_text(lang, 'select_district'),
         reply_markup=reply_markup
     )
+    context.user_data['last_message_id'] = message.message_id
     return DISTRICT
 
 async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -695,23 +746,33 @@ async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     lang = user_data[3] or 'ru'
     data = query.data
     
+    # Удаляем предыдущее сообщение
+    if 'last_message_id' in context.user_data:
+        await delete_previous_message(context, user_id, context.user_data['last_message_id'])
+    
     if data == 'back_to_category':
         city = context.user_data.get('city')
         keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in PRODUCTS[city].keys()]
         keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_main")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
-            get_text(lang, 'select_category'),
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'select_category'),
             reply_markup=reply_markup
         )
+        context.user_data['last_message_id'] = message.message_id
         return CATEGORY
     
     district = data.replace('dist_', '')
     city = context.user_data.get('city')
     
     if city not in DISTRICTS or district not in DISTRICTS[city]:
-        await query.edit_message_text(get_text(lang, 'error'))
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'error')
+        )
+        context.user_data['last_message_id'] = message.message_id
         return DISTRICT
     
     context.user_data['district'] = district
@@ -720,10 +781,12 @@ async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_district")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        get_text(lang, 'select_delivery'),
+    message = await context.bot.send_message(
+        chat_id=user_id,
+        text=get_text(lang, 'select_delivery'),
         reply_markup=reply_markup
     )
+    context.user_data['last_message_id'] = message.message_id
     return DELIVERY
 
 async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -735,6 +798,10 @@ async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     lang = user_data[3] or 'ru'
     data = query.data
     
+    # Удаляем предыдущее сообщение
+    if 'last_message_id' in context.user_data:
+        await delete_previous_message(context, user_id, context.user_data['last_message_id'])
+    
     if data == 'back_to_district':
         city = context.user_data.get('city')
         districts = DISTRICTS.get(city, [])
@@ -742,16 +809,22 @@ async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_category")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
-            get_text(lang, 'select_district'),
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'select_district'),
             reply_markup=reply_markup
         )
+        context.user_data['last_message_id'] = message.message_id
         return DISTRICT
     
     delivery_type = data.replace('del_', '')
     
     if delivery_type not in DELIVERY_TYPES:
-        await query.edit_message_text(get_text(lang, 'error'))
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'error')
+        )
+        context.user_data['last_message_id'] = message.message_id
         return DELIVERY
     
     context.user_data['delivery_type'] = delivery_type
@@ -777,10 +850,12 @@ async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        order_text,
+    message = await context.bot.send_message(
+        chat_id=user_id,
+        text=order_text,
         reply_markup=reply_markup
     )
+    context.user_data['last_message_id'] = message.message_id
     return CONFIRMATION
 
 async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -792,15 +867,21 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
     lang = user_data[3] or 'ru'
     data = query.data
     
+    # Удаляем предыдущее сообщение
+    if 'last_message_id' in context.user_data:
+        await delete_previous_message(context, user_id, context.user_data['last_message_id'])
+    
     if data == 'back_to_delivery':
         keyboard = [[InlineKeyboardButton(del_type, callback_data=f"del_{del_type}")] for del_type in DELIVERY_TYPES]
         keyboard.append([InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_district")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
-            get_text(lang, 'select_delivery'),
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'select_delivery'),
             reply_markup=reply_markup
         )
+        context.user_data['last_message_id'] = message.message_id
         return DELIVERY
     
     if data == 'confirm_yes':
@@ -834,10 +915,12 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 payment_address=order['payment_url']
             )
             
-            await query.edit_message_text(
-                payment_text,
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=payment_text,
                 parse_mode='Markdown'
             )
+            context.user_data['last_message_id'] = message.message_id
             
             context.job_queue.run_once(
                 check_payment,
@@ -845,7 +928,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 context={
                     'user_id': user_id,
                     'order_id': order['id'],
-                    'chat_id': query.message.chat_id,
+                    'chat_id': user_id,
                     'product_info': product_info,
                     'lang': lang
                 }
@@ -853,7 +936,11 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             return PAYMENT
         else:
-            await query.edit_message_text(get_text(lang, 'error'))
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=get_text(lang, 'error')
+            )
+            context.user_data['last_message_id'] = message.message_id
             return CONFIRMATION
     else:
         await show_main_menu(update, context, user_id, lang)

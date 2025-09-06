@@ -496,7 +496,32 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.answer()
     await query.edit_message_text(text=get_text(lang_code, 'language_selected'))
     
-    await show_main_menu(update, context, user_id, lang_code)
+    # Отправляем главное меню как новое сообщение
+    user = get_user(user_id)
+    text = get_text(
+        lang_code, 
+        'main_menu', 
+        name=user[2] or 'N/A',  # first_name
+        username=user[1] or 'N/A',  # username
+        purchases=user[7] or 0,  # purchase_count
+        discount=user[8] or 0,  # discount
+        balance=user[9] or 0  # balance
+    )
+    
+    buttons = [
+        ['🛒 Купить', '💳 Пополнить баланс'],
+        ['🎁 Бонусы', '📚 Правила'],
+        ['👨‍💻 Оператор', '🔧 Техподдержка'],
+        ['📢 Наш канал', '⭐ Отзывы'],
+        ['🌐 Наш сайт', '🤖 Личный бот']
+    ]
+    
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=text,
+        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+    )
+    
     return MAIN_MENU
 
 async def show_main_menu(update, context, user_id, lang):
@@ -609,7 +634,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data['category'] = category
     context.user_data['price'] = PRODUCTS[city][category]['price']
     
-    # Создаем клавиатуру с районаи
+    # Создаем клавиатуру с районами
     districts = DISTRICTS.get(city, [])
     districts_keyboard = [[district] for district in districts]
     
@@ -849,19 +874,39 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        user = update.message.from_user
-        user_data = get_user(user.id)
-        lang = user_data[3] or 'ru'
-        await update.message.reply_text(get_text(lang, 'error'))
-    except:
-        try:
-            # Добавляем проверку на наличие сообщения
-            if update and update.message:
-                await update.message.reply_text("Произошла ошибка. Попробуйте позже.")
-            else:
-                logger.error("Cannot send error message: update or update.message is None")
-        except Exception as e:
-            logger.error(f"Failed to send error message: {e}")
+        # Пытаемся получить chat_id разными способами
+        chat_id = None
+        user = None
+        
+        if update.message:
+            chat_id = update.message.chat_id
+            user = update.message.from_user
+        elif update.callback_query and update.callback_query.message:
+            chat_id = update.callback_query.message.chat_id
+            user = update.callback_query.from_user
+        elif update.callback_query:
+            chat_id = update.callback_query.from_user.id
+            user = update.callback_query.from_user
+        elif update.effective_chat:
+            chat_id = update.effective_chat.id
+            user = update.effective_user
+        
+        if chat_id is None:
+            logger.error("Cannot determine chat_id for error message")
+            return
+        
+        # Получаем язык пользователя
+        user_data = get_user(user.id) if user else None
+        lang = user_data[3] or 'ru' if user_data else 'ru'
+        
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=get_text(lang, 'error')
+        )
+    except Exception as e:
+        logger.error(f"Failed to send error message: {e}")
+        # Если не удалось отправить сообщение об ошибке, просто логируем
+        pass
 
 def main():
     # Создаем Application и передаем ему токен бота

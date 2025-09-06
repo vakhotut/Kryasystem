@@ -24,9 +24,10 @@ import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from threading import Thread
+from flask import Flask, request, jsonify
 
 # Импорт функций CryptoCloud
-from cryptocloud import create_cryptocloud_invoice, get_cryptocloud_invoice_status, check_payment_status_periodically
+from cryptocloud import create_cryptocloud_invoice, get_cryptocloud_invoice_status, check_payment_status_periodically, cancel_cryptocloud_invoice
 
 # Настройки логирования
 logging.basicConfig(
@@ -43,6 +44,9 @@ DATABASE_URL = os.environ['DATABASE_URL']
 
 # Состояния разговора
 CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, CRYPTO_CURRENCY, PAYMENT, BALANCE = range(11)
+
+# Создаем Flask приложение для обработки POSTBACK
+postback_app = Flask(__name__)
 
 # Инициализация базы данных
 def init_db():
@@ -408,8 +412,9 @@ def check_pending_transactions(app):
                 invoice_uuid = transaction['invoice_uuid']
                 status_info = get_cryptocloud_invoice_status(invoice_uuid)
                 
-                if status_info and status_info.get('status') == 'success':
-                    invoice_status = status_info['result']['status']
+                if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
+                    invoice = status_info['result'][0]  # Берем первый счет из массива
+                    invoice_status = invoice['status']
                     if invoice_status == 'paid':
                         update_transaction_status_by_uuid(invoice_uuid, 'paid')
                         
@@ -444,6 +449,83 @@ async def delete_previous_message(context: ContextTypes.DEFAULT_TYPE, chat_id: i
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception as e:
         logger.error(f"Error deleting message: {e}")
+
+# Обработчик POSTBACK уведомлений от CryptoCloud
+@postback_app.route('/cryptocloud_postback', methods=['POST'])
+def handle_cryptocloud_postback():
+    try:
+        # Получаем данные из POST запроса
+        data = request.form.to_dict()
+        
+        # Логируем полученные данные для отладки
+        logger.info(f"Received CryptoCloud postback: {data}")
+        
+        # Извлекаем необходимые данные
+        status = data.get('status')
+        invoice_id = data.get('invoice_id')
+        amount_crypto = data.get('amount_crypto')
+        currency = data.get('currency')
+        order_id = data.get('order_id')
+        token = data.get('token')
+        
+        # Проверяем, что это успешный платеж
+        if status == 'success' and order_id:
+            # Находим транзакцию по order_id
+            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute('SELECT * FROM transactions WHERE order_id = %s', (order_id,))
+            transaction = cursor.fetchone()
+            conn.close()
+            
+            if transaction:
+                # Обновляем статус транзакции
+                update_transaction_status(order_id, 'paid')
+                
+                # Добавляем покупку
+                user_id = transaction['user_id']
+                product_info = transaction['product_info']
+                price = transaction['amount']
+                
+                add_purchase(
+                    user_id,
+                    product_info,
+                    price,
+                    '',
+                    ''
+                )
+                
+                # Получаем информацию о продукте
+                product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
+                city = product_info.split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
+                
+                # Получаем пользователя для определения языка
+                user = get_user(user_id)
+                lang = user['language'] or 'ru' if user else 'ru'
+                
+                # Получаем изображение товара
+                product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
+                
+                # Отправляем уведомление пользователю
+                asyncio.run_coroutine_threadsafe(
+                    application.bot.send_message(
+                        chat_id=user_id,
+                        text=get_text(lang, 'payment_success', product_image=product_image)
+                    ),
+                    application.loop
+                )
+                
+                logger.info(f"Successfully processed postback for order {order_id}")
+        
+        return jsonify({'status': 'ok'}), 200
+        
+    except Exception as e:
+        logger.error(f"Error processing CryptoCloud postback: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+def run_postback_server():
+    """Запускает сервер для обработки POSTBACK уведомлений"""
+    port = int(os.environ.get('POSTBACK_PORT', 5001))
+    postback_app.run(host='0.0.0.0', port=port, debug=False)
 
 # Обработчики команд и состояний
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1053,11 +1135,12 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
     
     status_info = get_cryptocloud_invoice_status(invoice_uuid)
     
-    if status_info and status_info.get('status') == 'success':
-        invoice_status = status_info['result']['status']
+    if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
+        invoice = status_info['result'][0]  # Берем первый счет из массива
+        invoice_status = invoice['status']
         if invoice_status == 'paid':
             # Оплата получена
-            price = status_info['result']['amount_usd']
+            price = invoice['amount_usd']
             
             add_purchase(
                 user_id,
@@ -1226,6 +1309,9 @@ def main():
     
     # Запускаем проверку pending транзакций в отдельном потоке
     Thread(target=check_pending_transactions, args=(application,), daemon=True).start()
+    
+    # Запускаем сервер для обработки POSTBACK уведомлений в отдельном потоке
+    Thread(target=run_postback_server, daemon=True).start()
     
     # Определяем порт для Render
     port = int(os.environ.get('PORT', 5000))

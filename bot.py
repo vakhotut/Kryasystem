@@ -25,6 +25,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from threading import Thread
 
+# Импорт функций CryptoCloud
+from cryptocloud import create_cryptocloud_invoice, get_cryptocloud_invoice_status, check_payment_status_periodically
+
 # Настройки логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -34,12 +37,12 @@ logger = logging.getLogger(__name__)
 
 # Настройки бота
 TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-COINGATE_API_TOKEN = os.getenv("COINGATE_API_TOKEN", "YOUR_COINGATE_API_TOKEN")
-COINGATE_API_URL = "https://api.coingate.com/api/v2/orders"
+CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY", "YOUR_CRYPTOCLOUD_API_KEY")
+CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID", "YOUR_CRYPTOCLOUD_SHOP_ID")
 DATABASE_URL = os.environ['DATABASE_URL']
 
 # Состояния разговора
-CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, PAYMENT, BALANCE = range(10)
+CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, CRYPTO_CURRENCY, PAYMENT, BALANCE = range(11)
 
 # Инициализация базы данных
 def init_db():
@@ -76,6 +79,7 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         expires_at TIMESTAMP,
         product_info TEXT,
+        invoice_uuid TEXT,
         FOREIGN KEY (user_id) REFERENCES users (user_id)
     )
     ''')
@@ -117,14 +121,14 @@ def update_user(user_id, **kwargs):
     conn.commit()
     conn.close()
 
-def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info):
+def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid):
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cursor = conn.cursor()
     
     cursor.execute('''
-    INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    ''', (user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info))
+    INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ''', (user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid))
     
     conn.commit()
     conn.close()
@@ -162,6 +166,13 @@ def update_transaction_status(order_id, status):
     conn.commit()
     conn.close()
 
+def update_transaction_status_by_uuid(invoice_uuid, status):
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE transactions SET status = %s WHERE invoice_uuid = %s', (status, invoice_uuid))
+    conn.commit()
+    conn.close()
+
 # Инициализация базы данных при запуске
 init_db()
 
@@ -191,11 +202,13 @@ TEXTS = {
             "🚚 Тип доставки: {delivery_type}\n\n"
             "Всё верно?"
         ),
-        'payment_method': 'Выберите метод оплаты:',
+        'select_crypto': 'Выберите криптовалюту для оплаты:',
         'payment_instructions': (
             "Оплатите {amount} {currency} по адресу:\n"
             "`{payment_address}`\n\n"
-            "У вас есть 30 минут для оплаты. После оплаты товар будет выслан автоматически."
+            "Или отсканируйте QR-код:\n"
+            "![QR Code]({qr_code})\n\n"
+            "У вас есть 60 минут для оплаты. После оплаты товар будет выслан автоматически."
         ),
         'payment_timeout': 'Время оплаты истекло. Заказ отменен.',
         'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
@@ -204,7 +217,7 @@ TEXTS = {
         'balance_add_success': 'Баланс пополнен на {amount} лари. Текущий баланс: {balance} лари',
         'support': 'По всем вопросам обращайтесь к @support_username',
         'bonuses': 'Бонусная система:\n- За каждую 5-ю покупку скидка 10%\n- Пригласи друга и получи 50 лари на баланс',
-        'rules': 'Правила:\n1. Не сообщайте никому данные о заказе\n2. Оплата только в течение 30 минут\n3. При нарушении правил - бан',
+        'rules': 'Правила:\n1. Не сообщайте никому данные о заказе\n2. Оплата только в течение 60 минут\n3. При нарушении правил - бан',
         'reviews': 'Наши отзывы: @reviews_channel',
         'error': 'Произошла ошибка. Попробуйте позже.',
         'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.',
@@ -237,11 +250,13 @@ TEXTS = {
             "🚚 Delivery type: {delivery_type}\n\n"
             "Is everything correct?"
         ),
-        'payment_method': 'Select payment method:',
+        'select_crypto': 'Select cryptocurrency for payment:',
         'payment_instructions': (
             "Pay {amount} {currency} to address:\n"
             "`{payment_address}`\n\n"
-            "You have 30 minutes to pay. After payment, the product will be sent automatically."
+            "Or scan QR-code:\n"
+            "![QR Code]({qr_code})\n\n"
+            "You have 60 minutes to pay. After payment, the product will be sent automatically."
         ),
         'payment_timeout': 'Payment time has expired. Order canceled.',
         'payment_success': 'Payment received! Your product:\n\n{product_image}',
@@ -250,7 +265,7 @@ TEXTS = {
         'balance_add_success': 'Balance topped up by {amount} lari. Current balance: {balance} lari',
         'support': 'For all questions contact @support_username',
         'bonuses': 'Bonus system:\n- 10% discount for every 5th purchase\n- Invite a friend and get 50 lari on your balance',
-        'rules': 'Rules:\n1. Do not share order information with anyone\n2. Payment only within 30 minutes\n3. Ban for breaking the rules',
+        'rules': 'Rules:\n1. Do not share order information with anyone\n2. Payment only within 60 minutes\n3. Ban for breaking the rules',
         'reviews': 'Our reviews: @reviews_channel',
         'error': 'An error occurred. Please try again later.',
         'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.',
@@ -283,11 +298,13 @@ TEXTS = {
             "🚚 მიწოდების ტიპი: {delivery_type}\n\n"
             "ყველაფერი სწორია?"
         ),
-        'payment_method': 'აირჩიეთ გადახდის მეთოდი:',
+        'select_crypto': 'აირჩიეთ კრიპტოვალუტა გადასახდელად:',
         'payment_instructions': (
             "გადაიხადეთ {amount} {currency} მისამართზე:\n"
             "`{payment_address}`\n\n"
-            "გადახდისთვის გაქვთ 30 წუთი. გადახდის შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად."
+            "ან სკანირება QR-კოდი:\n"
+            "![QR Code]({qr_code})\n\n"
+            "გადახდისთვის გაქვთ 60 წუთი. გადახდის შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად."
         ),
         'payment_timeout': 'გადახდის დრო ამოიწურა. შეკვეთა გაუქმებულია.',
         'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
@@ -296,7 +313,7 @@ TEXTS = {
         'balance_add_success': 'ბალანსი შეივსო {amount} ლარით. მიმდინარე ბალანსი: {balance} ლარი',
         'support': 'ყველა კითხვისთვის დაუკავშირდით @support_username',
         'bonuses': 'ბონუს სისტემა:\n- ყოველ მე-5 ყიდვაზე 10% ფასდაკლება\n- მოიწვიე მეგობარი და მიიღე 50 ლარი ბალანსზე',
-        'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 30 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
+        'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 60 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
         'reviews': 'ჩვენი მიმოხილვები: @reviews_channel',
         'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
         'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.',
@@ -338,6 +355,14 @@ DISTRICTS = {
 
 DELIVERY_TYPES = ['Подъезд', 'Прикоп', 'Магнит', 'Во дворах']
 
+# Доступные криптовалюты
+CRYPTO_CURRENCIES = {
+    'BTC': 'Bitcoin',
+    'ETH': 'Ethereum',
+    'USDT': 'Tether (TRC20)',
+    'LTC': 'Litecoin'
+}
+
 # Функция для получения текста на нужном языке
 def get_text(lang, key, **kwargs):
     if lang not in TEXTS:
@@ -368,46 +393,6 @@ def is_banned(user_id):
             return False
     return False
 
-# Функция для создания платежа через CoinGate
-def create_coingate_order(amount, currency, description):
-    headers = {
-        'Authorization': f'Token {COINGATE_API_TOKEN}',
-        'Content-Type': 'application/json'
-    }
-    
-    data = {
-        'order_id': f'order_{int(time.time())}',
-        'price_amount': amount,
-        'price_currency': 'USD',
-        'receive_currency': currency,
-        'title': description,
-        'callback_url': 'https://yourdomain.com/callback',
-        'cancel_url': 'https://yourdomain.com/cancel',
-        'success_url': 'https://yourdomain.com/success'
-    }
-    
-    try:
-        response = requests.post(COINGATE_API_URL, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error creating CoinGate order: {e}")
-        return None
-
-# Функция для проверки статуса платежа
-def check_payment_status(order_id):
-    headers = {
-        'Authorization': f'Token {COINGATE_API_TOKEN}'
-    }
-    
-    try:
-        response = requests.get(f'{COINGATE_API_URL}/{order_id}', headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error checking payment status: {e}")
-        return None
-
 # Функция для получения последнего заказа пользователя
 def get_last_order(user_id):
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -423,29 +408,35 @@ def check_pending_transactions(app):
         try:
             transactions = get_pending_transactions()
             for transaction in transactions:
-                order_id = transaction['order_id']
-                status_info = check_payment_status(order_id)
+                invoice_uuid = transaction['invoice_uuid']
+                status_info = get_cryptocloud_invoice_status(invoice_uuid)
                 
-                if status_info:
-                    status = status_info.get('status')
-                    if status == 'paid':
-                        update_transaction_status(order_id, 'paid')
+                if status_info and status_info.get('status') == 'success':
+                    invoice_status = status_info['result']['status']
+                    if invoice_status == 'paid':
+                        update_transaction_status_by_uuid(invoice_uuid, 'paid')
                         
                         user_id = transaction['user_id']
                         product_info = transaction['product_info']
                         
+                        # Получаем информацию о продукте для изображения
+                        product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
+                        city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
+                        
+                        product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
+                        
                         asyncio.run_coroutine_threadsafe(
                             app.bot.send_message(
                                 chat_id=user_id,
-                                text=get_text('ru', 'payment_success', product_image=PRODUCTS['Тбилиси']['0.5 меф']['image'])
+                                text=get_text('ru', 'payment_success', product_image=product_image)
                             ),
                             app.loop
                         )
                         
-                    elif status == 'expired' or status == 'canceled':
-                        update_transaction_status(order_id, status)
+                    elif invoice_status in ['expired', 'canceled']:
+                        update_transaction_status_by_uuid(invoice_uuid, invoice_status)
             
-            time.sleep(60)
+            time.sleep(60)  # Проверяем каждые 60 секунд
         except Exception as e:
             logger.error(f"Error in check_pending_transactions: {e}")
             time.sleep(60)
@@ -889,112 +880,207 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         return DELIVERY
     
     if data == 'confirm_yes':
+        # Переходим к выбору криптовалюты
+        keyboard = [
+            [InlineKeyboardButton("BTC", callback_data="crypto_BTC")],
+            [InlineKeyboardButton("ETH", callback_data="crypto_ETH")],
+            [InlineKeyboardButton("USDT", callback_data="crypto_USDT")],
+            [InlineKeyboardButton("LTC", callback_data="crypto_LTC")],
+            [InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_confirmation")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'select_crypto'),
+            reply_markup=reply_markup
+        )
+        context.user_data['last_message_id'] = message.message_id
+        return CRYPTO_CURRENCY
+    else:
+        await show_main_menu(update, context, user_id, lang)
+        return MAIN_MENU
+
+async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
+    lang = user_data['language'] or 'ru'
+    data = query.data
+    
+    # Удаляем предыдущее сообщение
+    if 'last_message_id' in context.user_data:
+        await delete_previous_message(context, user_id, context.user_data['last_message_id'])
+    
+    if data == 'back_to_confirmation':
         city = context.user_data.get('city')
         category = context.user_data.get('category')
         price = context.user_data.get('price')
         district = context.user_data.get('district')
         delivery_type = context.user_data.get('delivery_type')
         
-        product_info = f"{category} в {city}, район {district}, {delivery_type}"
+        order_text = get_text(
+            lang, 
+            'order_summary',
+            product=category,
+            price=price,
+            district=district,
+            delivery_type=delivery_type
+        )
         
-        order = create_coingate_order(price, 'USD', product_info)
+        keyboard = [
+            [InlineKeyboardButton("✅ Да", callback_data="confirm_yes")],
+            [InlineKeyboardButton("❌ Нет", callback_data="confirm_no")],
+            [InlineKeyboardButton(get_text(lang, 'back'), callback_data="back_to_delivery")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        if order:
-            expires_at = datetime.now() + timedelta(minutes=30)
-            add_transaction(
-                user_id,
-                price,
-                'USD',
-                order['id'],
-                order['payment_url'],
-                expires_at,
-                product_info
-            )
-            
-            payment_text = get_text(
-                lang,
-                'payment_instructions',
-                amount=price,
-                currency='USD',
-                payment_address=order['payment_url']
-            )
-            
-            message = await context.bot.send_message(
-                chat_id=user_id,
-                text=payment_text,
-                parse_mode='Markdown'
-            )
-            context.user_data['last_message_id'] = message.message_id
-            
-            context.job_queue.run_once(
-                check_payment,
-                1800,
-                context={
-                    'user_id': user_id,
-                    'order_id': order['id'],
-                    'chat_id': user_id,
-                    'product_info': product_info,
-                    'lang': lang
-                }
-            )
-            
-            return PAYMENT
-        else:
-            message = await context.bot.send_message(
-                chat_id=user_id,
-                text=get_text(lang, 'error')
-            )
-            context.user_data['last_message_id'] = message.message_id
-            return CONFIRMATION
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=order_text,
+            reply_markup=reply_markup
+        )
+        context.user_data['last_message_id'] = message.message_id
+        return CONFIRMATION
+    
+    crypto_currency = data.replace('crypto_', '')
+    context.user_data['crypto_currency'] = crypto_currency
+    
+    city = context.user_data.get('city')
+    category = context.user_data.get('category')
+    price = context.user_data.get('price')
+    district = context.user_data.get('district')
+    delivery_type = context.user_data.get('delivery_type')
+    
+    product_info = f"{category} в {city}, район {district}, {delivery_type}"
+    
+    # Создаем заказ в CryptoCloud
+    order_id = f"order_{int(time.time())}_{user_id}"
+    invoice = create_cryptocloud_invoice(price, crypto_currency, order_id)
+    
+    if invoice and invoice.get('status') == 'success':
+        invoice_uuid = invoice['result']['uuid']
+        payment_url = invoice['result']['link']
+        
+        # Получаем QR-код (если доступен)
+        qr_code = invoice['result'].get('qr_code', payment_url)
+        
+        expires_at = datetime.now() + timedelta(minutes=60)
+        add_transaction(
+            user_id,
+            price,
+            crypto_currency,
+            order_id,
+            payment_url,
+            expires_at,
+            product_info,
+            invoice_uuid
+        )
+        
+        payment_text = get_text(
+            lang,
+            'payment_instructions',
+            amount=price,
+            currency=crypto_currency,
+            payment_address=payment_url,
+            qr_code=qr_code
+        )
+        
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=payment_text,
+            parse_mode='Markdown'
+        )
+        context.user_data['last_message_id'] = message.message_id
+        
+        # Запускаем проверку оплаты в фоновом режиме
+        context.job_queue.run_repeating(
+            check_payment,
+            interval=60,
+            first=60,
+            context={
+                'user_id': user_id,
+                'order_id': order_id,
+                'invoice_uuid': invoice_uuid,
+                'chat_id': user_id,
+                'product_info': product_info,
+                'lang': lang
+            }
+        )
+        
+        return PAYMENT
     else:
-        await show_main_menu(update, context, user_id, lang)
-        return MAIN_MENU
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=get_text(lang, 'error')
+        )
+        context.user_data['last_message_id'] = message.message_id
+        return CRYPTO_CURRENCY
 
 async def check_payment(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
-    order_id = job.context['order_id']
+    invoice_uuid = job.context['invoice_uuid']
     user_id = job.context['user_id']
     chat_id = job.context['chat_id']
     lang = job.context['lang']
+    product_info = job.context['product_info']
     
-    status_info = check_payment_status(order_id)
+    status_info = get_cryptocloud_invoice_status(invoice_uuid)
     
-    if status_info and status_info.get('status') == 'paid':
-        product_info = job.context['product_info']
-        
-        add_purchase(
-            user_id,
-            product_info,
-            status_info['price_amount'],
-            '',
-            ''
-        )
-        
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=get_text(lang, 'payment_success', product_image=PRODUCTS['Тбилиси']['0.5 меф']['image'])
-        )
-        
-        update_transaction_status(order_id, 'paid')
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=get_text(lang, 'payment_timeout')
-        )
-        
-        user = get_user(user_id)
-        failed_payments = user['failed_payments'] + 1
-        update_user(user_id, failed_payments=failed_payments)
-        
-        if failed_payments >= 3:
-            ban_until = datetime.now() + timedelta(hours=24)
-            update_user(user_id, ban_until=ban_until.strftime('%Y-%m-%d %H:%M:%S'))
+    if status_info and status_info.get('status') == 'success':
+        invoice_status = status_info['result']['status']
+        if invoice_status == 'paid':
+            # Оплата получена
+            price = status_info['result']['amount_usd']
+            
+            add_purchase(
+                user_id,
+                product_info,
+                price,
+                '',
+                ''
+            )
+            
+            # Получаем изображение товара
+            product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
+            city = product_info.split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
+            
+            product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
+            
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=get_text(lang, 'ban_message')
+                text=get_text(lang, 'payment_success', product_image=product_image)
             )
-        
-        update_transaction_status(order_id, 'expired')
+            
+            update_transaction_status_by_uuid(invoice_uuid, 'paid')
+            
+            # Останавливаем задачу
+            job.schedule_removal()
+        elif invoice_status in ['expired', 'canceled']:
+            # Инвойс просрочен или отменен
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=get_text(lang, 'payment_timeout')
+            )
+            
+            user = get_user(user_id)
+            failed_payments = user['failed_payments'] + 1
+            update_user(user_id, failed_payments=failed_payments)
+            
+            if failed_payments >= 3:
+                ban_until = datetime.now() + timedelta(hours=24)
+                update_user(user_id, ban_until=ban_until.strftime('%Y-%m-%d %H:%M:%S'))
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=get_text(lang, 'ban_message')
+                )
+            
+            update_transaction_status_by_uuid(invoice_uuid, invoice_status)
+            
+            # Останавливаем задачу
+            job.schedule_removal()
 
 async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
@@ -1103,6 +1189,8 @@ def main():
             DISTRICT: [CallbackQueryHandler(handle_district)],
             DELIVERY: [CallbackQueryHandler(handle_delivery)],
             CONFIRMATION: [CallbackQueryHandler(handle_confirmation)],
+            CRYPTO_CURRENCY: [CallbackQueryHandler(handle_crypto_currency)],
+            PAYMENT: [CallbackQueryHandler(handle_main_menu)],  # В состоянии оплаты просто возвращаем в главное меню
             BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_balance)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],

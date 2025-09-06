@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    InputMediaPhoto
 )
 from telegram.ext import (
     Application,
@@ -170,7 +171,6 @@ TEXTS = {
         'captcha_failed': 'Неверная каптча! Попробуйте снова:',
         'language_selected': 'Язык установлен: Русский',
         'main_menu': (
-            "🏪 Магазин AutoShop\n"
             "👤 Имя: {name}\n"
             "📛 Юзернейм: @{username}\n"
             "🛒 Покупок: {purchases}\n"
@@ -207,7 +207,9 @@ TEXTS = {
         'error': 'Произошла ошибка. Попробуйте позже.',
         'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.',
         'back': '⬅️ Назад',
-        'main_menu_button': '🏠 Главное меню'
+        'main_menu_button': '🏠 Главное меню',
+        'last_order': 'Информация о последнем заказе',
+        'no_orders': 'У вас еще не было заказов'
     },
     'en': {
         'welcome': 'Welcome!',
@@ -215,7 +217,6 @@ TEXTS = {
         'captcha_failed': 'Invalid captcha! Try again:',
         'language_selected': 'Language set: English',
         'main_menu': (
-            "🏪 AutoShop Store\n"
             "👤 Name: {name}\n"
             "📛 Username: @{username}\n"
             "🛒 Purchases: {purchases}\n"
@@ -252,7 +253,9 @@ TEXTS = {
         'error': 'An error occurred. Please try again later.',
         'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.',
         'back': '⬅️ Back',
-        'main_menu_button': '🏠 Main Menu'
+        'main_menu_button': '🏠 Main Menu',
+        'last_order': 'Information about last order',
+        'no_orders': 'You have no orders yet'
     },
     'ka': {
         'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
@@ -260,7 +263,6 @@ TEXTS = {
         'captcha_failed': 'არასწორი captcha! სცადეთ თავიდან:',
         'language_selected': 'ენა დაყენებულია: ქართული',
         'main_menu': (
-            "🏪 AutoShop მაღაზია\n"
             "👤 სახელი: {name}\n"
             "📛 მომხმარებლის სახელი: @{username}\n"
             "🛒 ყიდვები: {purchases}\n"
@@ -297,7 +299,9 @@ TEXTS = {
         'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
         'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.',
         'back': '⬅️ უკან',
-        'main_menu_button': '🏠 მთავარი მენიუ'
+        'main_menu_button': '🏠 მთავარი მენიუ',
+        'last_order': 'ბოლო შეკვეთის ინფორმაცია',
+        'no_orders': 'ჯერ არ გაქვთ შეკვეთები'
     }
 }
 
@@ -308,6 +312,10 @@ PRODUCTS = {
         '1.0 меф': {'price': 200, 'image': 'https://example.com/image2.jpg'},
         '0.5 меф золотой': {'price': 150, 'image': 'https://example.com/image3.jpg'},
         '0.3 красный': {'price': 100, 'image': 'https://example.com/image4.jpg'}
+    },
+    'Гори': {
+        '0.5 меф': {'price': 100, 'image': 'https://example.com/image1.jpg'},
+        '1.0 меф': {'price': 200, 'image': 'https://example.com/image2.jpg'}
     },
     'Кутаиси': {
         '0.5 меф': {'price': 100, 'image': 'https://example.com/image1.jpg'},
@@ -321,6 +329,7 @@ PRODUCTS = {
 
 DISTRICTS = {
     'Тбилиси': ['Церетели', 'Центр', 'Сабуртало'],
+    'Гори': ['Центр', 'Западный', 'Восточный'],
     'Кутаиси': ['Центр', 'Западный', 'Восточный'],
     'Батуми': ['Центр', 'Бульвар', 'Старый город']
 }
@@ -389,11 +398,20 @@ def check_payment_status(order_id):
     
     try:
         response = requests.get(f'{COINGATE_API_URL}/{order_id}', headers=headers)
-        response.raise_forStatus()
+        response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"Error checking payment status: {e}")
         return None
+
+# Функция для получения последнего заказа пользователя
+def get_last_order(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM purchases WHERE user_id = ? ORDER BY purchase_time DESC LIMIT 1', (user_id,))
+    order = cursor.fetchone()
+    conn.close()
+    return order
 
 # Поток для проверки pending транзакций
 def check_pending_transactions(app):
@@ -497,7 +515,11 @@ async def show_main_menu(update, context, user_id, lang):
     if not user:
         return
     
-    text = get_text(
+    # Описание магазина
+    shop_description = "🏪 AutoShop - лучшие товары с доставкой по Грузии\n\n"
+    
+    # Текст с информацией о пользователе
+    user_info_text = get_text(
         lang, 
         'main_menu', 
         name=user[2] or 'N/A',
@@ -507,29 +529,59 @@ async def show_main_menu(update, context, user_id, lang):
         balance=user[9] or 0
     )
     
+    # Полное сообщение с описанием магазина и информацией пользователя
+    full_text = shop_description + user_info_text
+    
+    # Создаем клавиатуру
     keyboard = [
-        [InlineKeyboardButton(city, callback_data=f"city_{city}")] for city in PRODUCTS.keys()
-    ]
-    keyboard.extend([
-        [InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance")],
-        [InlineKeyboardButton("🎁 Бонусы", callback_data="bonuses")],
-        [InlineKeyboardButton("📚 Правила", callback_data="rules")],
+        [InlineKeyboardButton("Тбилиси", callback_data="city_Тбилиси")],
+        [InlineKeyboardButton("Гори", callback_data="city_Гори")],
+        [InlineKeyboardButton("Кутаиси", callback_data="city_Кутаиси")],
+        [InlineKeyboardButton("Батуми", callback_data="city_Батуми")],
+        [
+            InlineKeyboardButton(f"💰 Баланс: {user[9] or 0} лари", callback_data="balance"),
+            InlineKeyboardButton("📦 Последний заказ", callback_data="last_order")
+        ],
+        [
+            InlineKeyboardButton("🎁 Бонусы", callback_data="bonuses"),
+            InlineKeyboardButton("📚 Правила", callback_data="rules")
+        ],
         [InlineKeyboardButton("👨‍💻 Оператор", callback_data="operator")],
         [InlineKeyboardButton("🔧 Техподдержка", callback_data="support")],
         [InlineKeyboardButton("📢 Наш канал", callback_data="channel")],
         [InlineKeyboardButton("⭐ Отзывы", callback_data="reviews")],
         [InlineKeyboardButton("🌐 Наш сайт", callback_data="website")],
         [InlineKeyboardButton("🤖 Личный бот", callback_data="personal_bot")]
-    ])
+    ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # URL изображения
+    image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
+    
     if update.callback_query:
-        await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup)
+        try:
+            # Пытаемся отредактировать сообщение с изображением
+            await update.callback_query.edit_message_media(
+                media=InputMediaPhoto(media=image_url, caption=full_text),
+                reply_markup=reply_markup
+            )
+        except:
+            # Если не получается отредактировать (например, было текстовое сообщение),
+            # удаляем старое и отправляем новое с изображением
+            await update.callback_query.delete_message()
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=image_url,
+                caption=full_text,
+                reply_markup=reply_markup
+            )
     else:
-        await context.bot.send_message(
+        # Отправляем новое сообщение с изображением
+        await context.bot.send_photo(
             chat_id=user_id,
-            text=text,
+            photo=image_url,
+            caption=full_text,
             reply_markup=reply_markup
         )
 
@@ -558,6 +610,21 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == 'balance':
         await query.edit_message_text(get_text(lang, 'balance_add'))
         return BALANCE
+    elif data == 'last_order':
+        last_order = get_last_order(user_id)
+        if last_order:
+            order_text = (
+                f"📦 Товар: {last_order[2]}\n"
+                f"💵 Стоимость: {last_order[3]} лари\n"
+                f"🏙 Район: {last_order[4]}\n"
+                f"🚚 Тип доставки: {last_order[5]}\n"
+                f"🕐 Время заказа: {last_order[6]}\n"
+                f"📊 Статус: {last_order[7]}"
+            )
+            await query.edit_message_text(order_text)
+        else:
+            await query.edit_message_text(get_text(lang, 'no_orders'))
+        return MAIN_MENU
     elif data == 'bonuses':
         await query.edit_message_text(get_text(lang, 'bonuses'))
         return MAIN_MENU

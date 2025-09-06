@@ -206,7 +206,8 @@ TEXTS = {
         'reviews': 'Наши отзывы: @reviews_channel',
         'error': 'Произошла ошибка. Попробуйте позже.',
         'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.',
-        'back': '⬅️ Назад'
+        'back': '⬅️ Назад',
+        'main_menu_button': '🏠 Главное меню'
     },
     'en': {
         'welcome': 'Welcome!',
@@ -250,7 +251,8 @@ TEXTS = {
         'reviews': 'Our reviews: @reviews_channel',
         'error': 'An error occurred. Please try again later.',
         'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.',
-        'back': '⬅️ Back'
+        'back': '⬅️ Back',
+        'main_menu_button': '🏠 Main Menu'
     },
     'ka': {
         'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
@@ -294,7 +296,8 @@ TEXTS = {
         'reviews': 'ჩვენი მიმოხილვები: @reviews_channel',
         'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
         'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.',
-        'back': '⬅️ უკან'
+        'back': '⬅️ უკან',
+        'main_menu_button': '🏠 მთავარი მენიუ'
     }
 }
 
@@ -938,13 +941,11 @@ def main():
             CAPTCHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_captcha)],
             LANGUAGE: [CallbackQueryHandler(set_language)],
             MAIN_MENU: [CallbackQueryHandler(handle_main_menu)],
-            CITY: [CallbackQueryHandler(handle_main_menu)],
             CATEGORY: [CallbackQueryHandler(handle_category)],
             DISTRICT: [CallbackQueryHandler(handle_district)],
             DELIVERY: [CallbackQueryHandler(handle_delivery)],
             CONFIRMATION: [CallbackQueryHandler(handle_confirmation)],
             BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_balance)],
-            PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )

@@ -39,6 +39,8 @@ def create_cryptocloud_invoice(amount, currency, order_id, email=None):
         return response.json()
     except requests.exceptions.RequestException as e:
         print(f"Error creating CryptoCloud invoice: {e}")
+        if hasattr(e, 'response') and e.response:
+            print(f"Response content: {e.response.text}")
         return None
 
 def get_cryptocloud_invoice_status(invoice_uuid):

@@ -389,7 +389,7 @@ def check_payment_status(order_id):
     
     try:
         response = requests.get(f'{COINGATE_API_URL}/{order_id}', headers=headers)
-        response.raise_for_status()
+        response.raise_forStatus()
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"Error checking payment status: {e}")
@@ -954,9 +954,29 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error)
     
+    # Запускаем проверку pending транзакций в отдельном потоке
     Thread(target=check_pending_transactions, args=(application,), daemon=True).start()
     
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Определяем порт для Render
+    port = int(os.environ.get('PORT', 5000))
+    
+    # Используем вебхуки на Render, поллинг локально
+    if 'RENDER' in os.environ:
+        # На Render - используем вебхуки
+        webhook_url = os.environ.get('RENDER_EXTERNAL_URL', '')
+        if webhook_url:
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=TOKEN,
+                webhook_url=f"{webhook_url}/{TOKEN}",
+                drop_pending_updates=True
+            )
+        else:
+            application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    else:
+        # Локально - используем поллинг
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()

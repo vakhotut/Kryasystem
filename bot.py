@@ -483,7 +483,34 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.answer()
     await query.edit_message_text(text=get_text(lang_code, 'language_selected'))
     
-    await show_main_menu(update, context, user_id, lang_code)
+    # Показываем главное меню, редактируя текущее сообщение
+    user = get_user(user_id)
+    text = get_text(
+        lang_code, 
+        'main_menu', 
+        name=user[2] or 'N/A',
+        username=user[1] or 'N/A',
+        purchases=user[7] or 0,
+        discount=user[8] or 0,
+        balance=user[9] or 0
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🛒 Купить", callback_data="buy")],
+        [InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance")],
+        [InlineKeyboardButton("🎁 Бонусы", callback_data="bonuses")],
+        [InlineKeyboardButton("📚 Правила", callback_data="rules")],
+        [InlineKeyboardButton("👨‍💻 Оператор", callback_data="operator")],
+        [InlineKeyboardButton("🔧 Техподдержка", callback_data="support")],
+        [InlineKeyboardButton("📢 Наш канал", callback_data="channel")],
+        [InlineKeyboardButton("⭐ Отзывы", callback_data="reviews")],
+        [InlineKeyboardButton("🌐 Наш сайт", callback_data="website")],
+        [InlineKeyboardButton("🤖 Личный бот", callback_data="personal_bot")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text(text=text, reply_markup=reply_markup)
+    
     return MAIN_MENU
 
 async def show_main_menu(update, context, user_id, lang):
@@ -516,10 +543,12 @@ async def show_main_menu(update, context, user_id, lang):
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if hasattr(update, 'message'):
-        await update.message.reply_text(text, reply_markup=reply_markup)
-    else:
-        await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
+    # Отправляем новое сообщение с главным меню
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=text,
+        reply_markup=reply_markup
+    )
 
 async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query

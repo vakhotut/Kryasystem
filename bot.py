@@ -7,8 +7,6 @@ import os
 from datetime import datetime, timedelta
 from telegram import (
     Update,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     InlineKeyboardButton,
     InlineKeyboardMarkup
 )
@@ -38,7 +36,7 @@ COINGATE_API_TOKEN = os.getenv("COINGATE_API_TOKEN", "YOUR_COINGATE_API_TOKEN")
 COINGATE_API_URL = "https://api.coingate.com/api/v2/orders"
 
 # Состояния разговора
-CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, PAYMENT, BALANCE, SUPPORT, BONUSES, RULES, REVIEWS = range(14)
+CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, PAYMENT, BALANCE = range(10)
 
 # Инициализация базы данных
 def init_db():
@@ -364,7 +362,7 @@ def create_coingate_order(amount, currency, description):
         'price_currency': 'USD',
         'receive_currency': currency,
         'title': description,
-        'callback_url': 'https://yourdomain.com/callback',  # Замените на ваш URL
+        'callback_url': 'https://yourdomain.com/callback',
         'cancel_url': 'https://yourdomain.com/cancel',
         'success_url': 'https://yourdomain.com/success'
     }
@@ -403,14 +401,11 @@ def check_pending_transactions(app):
                 if status_info:
                     status = status_info.get('status')
                     if status == 'paid':
-                        # Обновляем статус транзакции
                         update_transaction_status(order_id, 'paid')
                         
-                        # Находим пользователя и отправляем товар
                         user_id = transaction[1]
                         product_info = transaction[8]
                         
-                        # Отправляем сообщение о успешной оплате
                         asyncio.run_coroutine_threadsafe(
                             app.bot.send_message(
                                 chat_id=user_id,
@@ -422,7 +417,7 @@ def check_pending_transactions(app):
                     elif status == 'expired' or status == 'canceled':
                         update_transaction_status(order_id, status)
             
-            time.sleep(60)  # Проверяем каждую минуту
+            time.sleep(60)
         except Exception as e:
             logger.error(f"Error in check_pending_transactions: {e}")
             time.sleep(60)
@@ -432,28 +427,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
     user_id = user.id
     
-    # Проверяем, не забанен ли пользователь
     if is_banned(user_id):
         await update.message.reply_text("Вы забанены. Обратитесь к поддержке.")
         return ConversationHandler.END
     
-    # Проверяем, есть ли пользователь в базе
     existing_user = get_user(user_id)
     if existing_user:
-        # Если пользователь уже проходил каптчу
-        if existing_user[4]:  # captcha_passed
+        if existing_user[4]:
             lang = existing_user[3] or 'ru'
             await update.message.reply_text(get_text(lang, 'welcome'))
             await show_main_menu(update, context, user_id, lang)
             return MAIN_MENU
     
-    # Генерируем каптчу для новых пользователей
     captcha_code = ''.join(random.choices('0123456789', k=5))
     context.user_data['captcha'] = captcha_code
     
     await update.message.reply_text(
-        get_text('ru', 'captcha', code=captcha_code),
-        reply_markup=ReplyKeyboardRemove()
+        get_text('ru', 'captcha', code=captcha_code)
     )
     return CAPTCHA
 
@@ -462,7 +452,6 @@ async def check_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     user = update.message.from_user
     
     if user_input == context.user_data.get('captcha'):
-        # Сохраняем пользователя в базу
         conn = sqlite3.connect('bot_database.db')
         cursor = conn.cursor()
         cursor.execute(
@@ -472,7 +461,6 @@ async def check_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         conn.commit()
         conn.close()
         
-        # Предлагаем выбрать язык
         keyboard = [
             [InlineKeyboardButton("Русский", callback_data='ru')],
             [InlineKeyboardButton("English", callback_data='en')],
@@ -490,38 +478,12 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     user_id = query.from_user.id
     lang_code = query.data
     
-    # Обновляем язык пользователя в базе
     update_user(user_id, language=lang_code)
     
     await query.answer()
     await query.edit_message_text(text=get_text(lang_code, 'language_selected'))
     
-    # Отправляем главное меню как новое сообщение
-    user = get_user(user_id)
-    text = get_text(
-        lang_code, 
-        'main_menu', 
-        name=user[2] or 'N/A',  # first_name
-        username=user[1] or 'N/A',  # username
-        purchases=user[7] or 0,  # purchase_count
-        discount=user[8] or 0,  # discount
-        balance=user[9] or 0  # balance
-    )
-    
-    buttons = [
-        ['🛒 Купить', '💳 Пополнить баланс'],
-        ['🎁 Бонусы', '📚 Правила'],
-        ['👨‍💻 Оператор', '🔧 Техподдержка'],
-        ['📢 Наш канал', '⭐ Отзывы'],
-        ['🌐 Наш сайт', '🤖 Личный бот']
-    ]
-    
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=text,
-        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True)
-    )
-    
+    await show_main_menu(update, context, user_id, lang_code)
     return MAIN_MENU
 
 async def show_main_menu(update, context, user_id, lang):
@@ -532,153 +494,168 @@ async def show_main_menu(update, context, user_id, lang):
     text = get_text(
         lang, 
         'main_menu', 
-        name=user[2] or 'N/A',  # first_name
-        username=user[1] or 'N/A',  # username
-        purchases=user[7] or 0,  # purchase_count
-        discount=user[8] or 0,  # discount
-        balance=user[9] or 0  # balance
+        name=user[2] or 'N/A',
+        username=user[1] or 'N/A',
+        purchases=user[7] or 0,
+        discount=user[8] or 0,
+        balance=user[9] or 0
     )
     
-    buttons = [
-        ['🛒 Купить', '💳 Пополнить баланс'],
-        ['🎁 Бонусы', '📚 Правила'],
-        ['👨‍💻 Оператор', '🔧 Техподдержка'],
-        ['📢 Наш канал', '⭐ Отзывы'],
-        ['🌐 Наш сайт', '🤖 Личный бот']
+    keyboard = [
+        [InlineKeyboardButton("🛒 Купить", callback_data="buy")],
+        [InlineKeyboardButton("💳 Пополнить баланс", callback_data="balance")],
+        [InlineKeyboardButton("🎁 Бонусы", callback_data="bonuses")],
+        [InlineKeyboardButton("📚 Правила", callback_data="rules")],
+        [InlineKeyboardButton("👨‍💻 Оператор", callback_data="operator")],
+        [InlineKeyboardButton("🔧 Техподдержка", callback_data="support")],
+        [InlineKeyboardButton("📢 Наш канал", callback_data="channel")],
+        [InlineKeyboardButton("⭐ Отзывы", callback_data="reviews")],
+        [InlineKeyboardButton("🌐 Наш сайт", callback_data="website")],
+        [InlineKeyboardButton("🤖 Личный бот", callback_data="personal_bot")]
     ]
     
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     if hasattr(update, 'message'):
-        await update.message.reply_text(text, reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
+        await update.message.reply_text(text, reply_markup=reply_markup)
     else:
-        await update.callback_query.message.reply_text(text, reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
+        await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
 
 async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.message.from_user
-    user_data = get_user(user.id)
-    lang = user_data[3] or 'ru'
-    text = update.message.text
+    query = update.callback_query
+    await query.answer()
     
-    if text == '🛒 Купить':
-        cities_keyboard = [[city] for city in PRODUCTS.keys()]
-        await update.message.reply_text(
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
+    lang = user_data[3] or 'ru'
+    data = query.data
+    
+    if data == 'buy':
+        keyboard = [[InlineKeyboardButton(city, callback_data=f"city_{city}")] for city in PRODUCTS.keys()]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
             get_text(lang, 'select_city'),
-            reply_markup=ReplyKeyboardMarkup(cities_keyboard, resize_keyboard=True)
+            reply_markup=reply_markup
         )
         return CITY
-    elif text == '💳 Пополнить баланс':
-        await update.message.reply_text(
-            get_text(lang, 'balance_add'),
-            reply_markup=ReplyKeyboardRemove()
-        )
+    elif data == 'balance':
+        await query.edit_message_text(get_text(lang, 'balance_add'))
         return BALANCE
-    elif text == '🎁 Бонусы':
-        await update.message.reply_text(get_text(lang, 'bonuses'))
+    elif data == 'bonuses':
+        await query.edit_message_text(get_text(lang, 'bonuses'))
         return MAIN_MENU
-    elif text == '📚 Правила':
-        await update.message.reply_text(get_text(lang, 'rules'))
+    elif data == 'rules':
+        await query.edit_message_text(get_text(lang, 'rules'))
         return MAIN_MENU
-    elif text == '👨‍💻 Оператор':
-        await update.message.reply_text(get_text(lang, 'support'))
+    elif data == 'operator' or data == 'support':
+        await query.edit_message_text(get_text(lang, 'support'))
         return MAIN_MENU
-    elif text == '🔧 Техподдержка':
-        await update.message.reply_text(get_text(lang, 'support'))
+    elif data == 'channel':
+        await query.edit_message_text("https://t.me/your_channel")
         return MAIN_MENU
-    elif text == '📢 Наш канал':
-        await update.message.reply_text("https://t.me/your_channel")  # Замените на ваш канал
+    elif data == 'reviews':
+        await query.edit_message_text(get_text(lang, 'reviews'))
         return MAIN_MENU
-    elif text == '⭐ Отзывы':
-        await update.message.reply_text(get_text(lang, 'reviews'))
+    elif data == 'website':
+        await query.edit_message_text("https://yourwebsite.com")
         return MAIN_MENU
-    elif text == '🌐 Наш сайт':
-        await update.message.reply_text("https://yourwebsite.com")  # Замените на ваш сайт
-        return MAIN_MENU
-    elif text == '🤖 Личный бот':
-        await update.message.reply_text("https://t.me/your_bot")  # Замените на вашего бота
+    elif data == 'personal_bot':
+        await query.edit_message_text("https://t.me/your_bot")
         return MAIN_MENU
     
     return MAIN_MENU
 
 async def handle_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.message.from_user
-    user_data = get_user(user.id)
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
     lang = user_data[3] or 'ru'
-    city = update.message.text
+    city = query.data.replace('city_', '')
     
     if city not in PRODUCTS:
-        await update.message.reply_text(get_text(lang, 'error'))
+        await query.edit_message_text(get_text(lang, 'error'))
         return CITY
     
     context.user_data['city'] = city
     
-    # Создаем клавиатуру с категориями товаров
-    categories = list(PRODUCTS[city].keys())
-    categories_keyboard = [[cat] for cat in categories]
+    keyboard = [[InlineKeyboardButton(cat, callback_data=f"cat_{cat}")] for cat in PRODUCTS[city].keys()]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    await query.edit_message_text(
         get_text(lang, 'select_category'),
-        reply_markup=ReplyKeyboardMarkup(categories_keyboard, resize_keyboard=True)
+        reply_markup=reply_markup
     )
     return CATEGORY
 
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.message.from_user
-    user_data = get_user(user.id)
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
     lang = user_data[3] or 'ru'
-    category = update.message.text
+    category = query.data.replace('cat_', '')
     city = context.user_data.get('city')
     
     if city not in PRODUCTS or category not in PRODUCTS[city]:
-        await update.message.reply_text(get_text(lang, 'error'))
+        await query.edit_message_text(get_text(lang, 'error'))
         return CATEGORY
     
     context.user_data['category'] = category
     context.user_data['price'] = PRODUCTS[city][category]['price']
     
-    # Создаем клавиатуру с районами
     districts = DISTRICTS.get(city, [])
-    districts_keyboard = [[district] for district in districts]
+    keyboard = [[InlineKeyboardButton(district, callback_data=f"dist_{district}")] for district in districts]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    await query.edit_message_text(
         get_text(lang, 'select_district'),
-        reply_markup=ReplyKeyboardMarkup(districts_keyboard, resize_keyboard=True)
+        reply_markup=reply_markup
     )
     return DISTRICT
 
 async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.message.from_user
-    user_data = get_user(user.id)
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
     lang = user_data[3] or 'ru'
-    district = update.message.text
+    district = query.data.replace('dist_', '')
     city = context.user_data.get('city')
     
     if city not in DISTRICTS or district not in DISTRICTS[city]:
-        await update.message.reply_text(get_text(lang, 'error'))
+        await query.edit_message_text(get_text(lang, 'error'))
         return DISTRICT
     
     context.user_data['district'] = district
     
-    # Создаем клавиатуру с типами доставки
-    delivery_keyboard = [[del_type] for del_type in DELIVERY_TYPES]
+    keyboard = [[InlineKeyboardButton(del_type, callback_data=f"del_{del_type}")] for del_type in DELIVERY_TYPES]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    await query.edit_message_text(
         get_text(lang, 'select_delivery'),
-        reply_markup=ReplyKeyboardMarkup(delivery_keyboard, resize_keyboard=True)
+        reply_markup=reply_markup
     )
     return DELIVERY
 
 async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.message.from_user
-    user_data = get_user(user.id)
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
     lang = user_data[3] or 'ru'
-    delivery_type = update.message.text
+    delivery_type = query.data.replace('del_', '')
     
     if delivery_type not in DELIVERY_TYPES:
-        await update.message.reply_text(get_text(lang, 'error'))
+        await query.edit_message_text(get_text(lang, 'error'))
         return DELIVERY
     
     context.user_data['delivery_type'] = delivery_type
     
-    # Формируем информацию о заказе
     city = context.user_data.get('city')
     category = context.user_data.get('category')
     price = context.user_data.get('price')
@@ -693,25 +670,28 @@ async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         delivery_type=delivery_type
     )
     
-    # Кнопки подтверждения
     keyboard = [
-        ['✅ Да', '❌ Нет']
+        [InlineKeyboardButton("✅ Да", callback_data="confirm_yes")],
+        [InlineKeyboardButton("❌ Нет", callback_data="confirm_no")]
     ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    await query.edit_message_text(
         order_text,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        reply_markup=reply_markup
     )
     return CONFIRMATION
 
 async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.message.from_user
-    user_data = get_user(user.id)
-    lang = user_data[3] or 'ru'
-    confirmation = update.message.text
+    query = update.callback_query
+    await query.answer()
     
-    if confirmation == '✅ Да':
-        # Создаем заказ в CoinGate
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
+    lang = user_data[3] or 'ru'
+    confirmation = query.data
+    
+    if confirmation == 'confirm_yes':
         city = context.user_data.get('city')
         category = context.user_data.get('category')
         price = context.user_data.get('price')
@@ -720,14 +700,12 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         product_info = f"{category} в {city}, район {district}, {delivery_type}"
         
-        # Создаем заказ в CoinGate
         order = create_coingate_order(price, 'USD', product_info)
         
         if order:
-            # Сохраняем транзакцию в базу
             expires_at = datetime.now() + timedelta(minutes=30)
             add_transaction(
-                user.id,
+                user_id,
                 price,
                 'USD',
                 order['id'],
@@ -736,7 +714,6 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 product_info
             )
             
-            # Показываем инструкции по оплате
             payment_text = get_text(
                 lang,
                 'payment_instructions',
@@ -745,20 +722,18 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 payment_address=order['payment_url']
             )
             
-            await update.message.reply_text(
+            await query.edit_message_text(
                 payment_text,
-                parse_mode='Markdown',
-                reply_markup=ReplyKeyboardRemove()
+                parse_mode='Markdown'
             )
             
-            # Запускаем таймер для проверки оплаты
             context.job_queue.run_once(
                 check_payment,
-                1800,  # 30 минут
+                1800,
                 context={
-                    'user_id': user.id,
+                    'user_id': user_id,
                     'order_id': order['id'],
-                    'chat_id': update.message.chat_id,
+                    'chat_id': query.message.chat_id,
                     'product_info': product_info,
                     'lang': lang
                 }
@@ -766,10 +741,10 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             return PAYMENT
         else:
-            await update.message.reply_text(get_text(lang, 'error'))
+            await query.edit_message_text(get_text(lang, 'error'))
             return CONFIRMATION
     else:
-        await show_main_menu(update, context, user.id, lang)
+        await show_main_menu(update, context, user_id, lang)
         return MAIN_MENU
 
 async def check_payment(context: ContextTypes.DEFAULT_TYPE):
@@ -779,43 +754,35 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
     chat_id = job.context['chat_id']
     lang = job.context['lang']
     
-    # Проверяем статус платежа
     status_info = check_payment_status(order_id)
     
     if status_info and status_info.get('status') == 'paid':
-        # Платеж получен, отправляем товар
         product_info = job.context['product_info']
         
-        # Добавляем покупку в историю
         add_purchase(
             user_id,
             product_info,
             status_info['price_amount'],
-            '',  # district
-            ''   # delivery_type
+            '',
+            ''
         )
         
-        # Отправляем сообщение о успешной оплате
         await context.bot.send_message(
             chat_id=chat_id,
             text=get_text(lang, 'payment_success', product_image=PRODUCTS['Тбилиси']['0.5 меф']['image'])
         )
         
-        # Обновляем статус транзакции
         update_transaction_status(order_id, 'paid')
     else:
-        # Платеж не получен
         await context.bot.send_message(
             chat_id=chat_id,
             text=get_text(lang, 'payment_timeout')
         )
         
-        # Увеличиваем счетчик неудачных платежей
         user = get_user(user_id)
-        failed_payments = user[6] + 1  # failed_payments
+        failed_payments = user[6] + 1
         update_user(user_id, failed_payments=failed_payments)
         
-        # Если 3 неудачных платежа, бан на 24 часа
         if failed_payments >= 3:
             ban_until = datetime.now() + timedelta(hours=24)
             update_user(user_id, ban_until=ban_until.strftime('%Y-%m-%d %H:%M:%S'))
@@ -824,7 +791,6 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
                 text=get_text(lang, 'ban_message')
             )
         
-        # Обновляем статус транзакции
         update_transaction_status(order_id, 'expired')
 
 async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -839,7 +805,6 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(get_text(lang, 'error'))
             return BALANCE
         
-        # Обновляем баланс пользователя
         current_balance = user_data[9] or 0
         new_balance = current_balance + amount
         update_user(user.id, balance=new_balance)
@@ -859,22 +824,17 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_data = get_user(user.id)
     lang = user_data[3] or 'ru'
     
-    await update.message.reply_text(
-        "Операция отменена.",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text("Операция отменена.")
     return ConversationHandler.END
 
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.warning('Update "%s" caused error "%s"', update, context.error)
     
-    # Добавляем проверку на None
     if update is None:
         logger.error("Update is None, cannot process error")
         return
     
     try:
-        # Пытаемся получить chat_id разными способами
         chat_id = None
         user = None
         
@@ -895,7 +855,6 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error("Cannot determine chat_id for error message")
             return
         
-        # Получаем язык пользователя
         user_data = get_user(user.id) if user else None
         lang = user_data[3] or 'ru' if user_data else 'ru'
         
@@ -905,44 +864,32 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Failed to send error message: {e}")
-        # Если не удалось отправить сообщение об ошибке, просто логируем
-        pass
 
 def main():
-    # Создаем Application и передаем ему токен бота
     application = Application.builder().token(TOKEN).build()
     
-    # Определяем обработчик разговоров
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
             CAPTCHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_captcha)],
             LANGUAGE: [CallbackQueryHandler(set_language)],
-            MAIN_MENU: [MessageHandler(filters.TEXT, handle_main_menu)],
-            CITY: [MessageHandler(filters.TEXT, handle_city)],
-            CATEGORY: [MessageHandler(filters.TEXT, handle_category)],
-            DISTRICT: [MessageHandler(filters.TEXT, handle_district)],
-            DELIVERY: [MessageHandler(filters.TEXT, handle_delivery)],
-            CONFIRMATION: [MessageHandler(filters.TEXT, handle_confirmation)],
-            BALANCE: [MessageHandler(filters.TEXT, handle_balance)],
+            MAIN_MENU: [CallbackQueryHandler(handle_main_menu)],
+            CITY: [CallbackQueryHandler(handle_city)],
+            CATEGORY: [CallbackQueryHandler(handle_category)],
+            DISTRICT: [CallbackQueryHandler(handle_district)],
+            DELIVERY: [CallbackQueryHandler(handle_delivery)],
+            CONFIRMATION: [CallbackQueryHandler(handle_confirmation)],
+            BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_balance)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     
-    # Добавляем обработчик разговоров в диспетчер
     application.add_handler(conv_handler)
-    
-    # Добавляем обработчик ошибок
     application.add_error_handler(error)
     
-    # Запускаем поток проверки транзакций
     Thread(target=check_pending_transactions, args=(application,), daemon=True).start()
     
-    # Запускаем бота
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
-    # Создаем новый event loop для Python 3.13
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     main()

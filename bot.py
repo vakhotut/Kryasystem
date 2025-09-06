@@ -195,7 +195,7 @@ TEXTS = {
         'payment_instructions': (
             "Оплатите {amount} {currency} по адресу:\n"
             "`{payment_address}`\n\n"
-            "У вас есть 30 минут для оплата. После оплаты товар будет выслан автоматически."
+            "У вас есть 30 минут для оплаты. После оплаты товар будет выслан автоматически."
         ),
         'payment_timeout': 'Время оплаты истекло. Заказ отменен.',
         'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
@@ -609,7 +609,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data['category'] = category
     context.user_data['price'] = PRODUCTS[city][category]['price']
     
-    # Создаем клавиатуру с районами
+    # Создаем клавиатуру с районаи
     districts = DISTRICTS.get(city, [])
     districts_keyboard = [[district] for district in districts]
     
@@ -867,9 +867,6 @@ def main():
     # Создаем Application и передаем ему токен бота
     application = Application.builder().token(TOKEN).build()
     
-    # Очищаем предыдущие вебхуки
-    asyncio.run(application.bot.delete_webhook())
-    
     # Определяем обработчик разговоров
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
@@ -900,4 +897,7 @@ def main():
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
+    # Создаем новый event loop для Python 3.13
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     main()

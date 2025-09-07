@@ -191,7 +191,7 @@ def update_transaction_status_by_uuid(invoice_uuid, status):
 # Инициализация базы данных при запуске
 init_db()
 
-# Тексты на разных языках
+# Тексты на разных языках (обновлены для USD)
 TEXTS = {
     'ru': {
         'welcome': 'Добро пожаловать!',
@@ -203,7 +203,7 @@ TEXTS = {
             "📛 Юзернейм: @{username}\n"
             "🛒 Покупок: {purchases}\n"
             "🎯 Скидка: {discount}%\n"
-            "💰 Баланс: {balance} лари"
+            "💰 Баланс: {balance}$"
         ),
         'select_city': 'Выберите город:',
         'select_category': 'Выберите категорию:',
@@ -212,7 +212,7 @@ TEXTS = {
         'order_summary': (
             "Информация о заказе:\n"
             "📦 Товар: {product}\n"
-            "💵 Стоимость: {price} лари\n"
+            "💵 Стоимость: {price}$\n"
             "🏙 Район: {district}\n"
             "🚚 Тип доставки: {delivery_type}\n\n"
             "Всё верно?"
@@ -221,16 +221,16 @@ TEXTS = {
         'payment_instructions': (
             "Оплатите {amount} {currency} по адресу:\n"
             "`{payment_address}`\n\n"
-            "Или отсканируйте QR-код:\n"
+            "Отсканируйте QR-код для оплаты:\n"
             "После оплаты товар будет выслан автоматически."
         ),
         'payment_timeout': 'Время оплата истекло. Заказ отменен.',
         'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
-        'balance': 'Ваш баланс: {balance} лари',
-        'balance_add': 'Введите сумму для пополнения баланса:',
-        'balance_add_success': 'Баланс пополнен на {amount} лари. Текущий баланс: {balance} лари',
+        'balance': 'Ваш баланс: {balance}$',
+        'balance_add': 'Введите сумму для пополнения баланса в $:',
+        'balance_add_success': 'Баланс пополнен на {amount}$. Текущий баланс: {balance}$',
         'support': 'По всем вопросам обращайтесь к @support_username',
-        'bonuses': 'Бонусная система:\n- За каждую 5-ю покупку скидка 10%\n- Пригласи друга и получи 50 лари на баланс',
+        'bonuses': 'Бонусная система:\n- За каждую 5-ю покупку скидка 10%\n- Пригласи друга и получи 50$ на баланс',
         'rules': 'Правила:\n1. Не сообщайте никому данные о заказе\n2. Оплата только в течение 60 минут\n3. При нарушении правил - бан',
         'reviews': 'Наши отзывы: @reviews_channel',
         'error': 'Произошла ошибка. Попробуйте позже.',
@@ -250,7 +250,7 @@ TEXTS = {
             "📛 Username: @{username}\n"
             "🛒 Purchases: {purchases}\n"
             "🎯 Discount: {discount}%\n"
-            "💰 Balance: {balance} lari"
+            "💰 Balance: {balance}$"
         ),
         'select_city': 'Select city:',
         'select_category': 'Select category:',
@@ -259,7 +259,7 @@ TEXTS = {
         'order_summary': (
             "Order information:\n"
             "📦 Product: {product}\n"
-            "💵 Price: {price} lari\n"
+            "💵 Price: {price}$\n"
             "🏙 District: {district}\n"
             "🚚 Delivery type: {delivery_type}\n\n"
             "Is everything correct?"
@@ -273,11 +273,11 @@ TEXTS = {
         ),
         'payment_timeout': 'Payment time has expired. Order canceled.',
         'payment_success': 'Payment received! Your product:\n\n{product_image}',
-        'balance': 'Your balance: {balance} lari',
-        'balance_add': 'Enter the amount to top up your balance:',
-        'balance_add_success': 'Balance topped up by {amount} lari. Current balance: {balance} lari',
+        'balance': 'Your balance: {balance}$',
+        'balance_add': 'Enter the amount to top up your balance in $:',
+        'balance_add_success': 'Balance topped up by {amount}$. Current balance: {balance}$',
         'support': 'For all questions contact @support_username',
-        'bonuses': 'Bonus system:\n- 10% discount for every 5th purchase\n- Invite a friend and get 50 lari on your balance',
+        'bonuses': 'Bonus system:\n- 10% discount for every 5th purchase\n- Invite a friend and get 50$ on your balance',
         'rules': 'Rules:\n1. Do not share order information with anyone\n2. Payment only within 60 minutes\n3. Ban for breaking the rules',
         'reviews': 'Our reviews: @reviews_channel',
         'error': 'An error occurred. Please try again later.',
@@ -297,7 +297,7 @@ TEXTS = {
             "📛 მომხმარებლის სახელი: @{username}\n"
             "🛒 ყიდვები: {purchases}\n"
             "🎯 ფასდაკლება: {discount}%\n"
-            "💰 ბალანსი: {balance} ლარი"
+            "💰 ბალანსი: {balance}$"
         ),
         'select_city': 'აირჩიეთ ქალაქი:',
         'select_category': 'აირჩიეთ კატეგორია:',
@@ -306,7 +306,7 @@ TEXTS = {
         'order_summary': (
             "შეკვეთის ინფორმაცია:\n"
             "📦 პროდუქტი: {product}\n"
-            "💵 ფასი: {price} ლარი\n"
+            "💵 ფასი: {price}$\n"
             "🏙 რაიონი: {district}\n"
             "🚚 მიწოდების ტიპი: {delivery_type}\n\n"
             "ყველაფერი სწორია?"
@@ -320,11 +320,11 @@ TEXTS = {
         ),
         'payment_timeout': 'გადახდის დრო ამოიწურა. შეკვეთა გაუქმებულია.',
         'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
-        'balance': 'თქვენი ბალანსი: {balance} ლარი',
-        'balance_add': 'შეიყვანეთ ბალანსის შევსების რაოდენობა:',
-        'balance_add_success': 'ბალანსი შეივსო {amount} ლარით. მიმდინარე ბալანსი: {balance} ლარი',
+        'balance': 'თქვენი ბალანსი: {balance}$',
+        'balance_add': 'შეიყვანეთ ბალანსის შევსების რაოდენობა $:',
+        'balance_add_success': 'ბალანსი შეივსო {amount}$-ით. მიმდინარე ბალანსი: {balance}$',
         'support': 'ყველა კითხვისთვის დაუკავშირდით @support_username',
-        'bonuses': 'ბონუს სისტემა:\n- ყოველ მე-5 ყიდვაზე 10% ფასდაკლება\n- მოიწვიე მეგობარი და მიიღე 50 ლარი ბალანსზე',
+        'bonuses': 'ბონუს სისტემა:\n- ყოველ მე-5 ყიდვაზე 10% ფასდაკლება\n- მოიწვიე მეგობარი და მიიღე 50$ ბალანსზე',
         'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 60 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
         'reviews': 'ჩვენი მიმოხილვები: @reviews_channel',
         'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
@@ -336,25 +336,25 @@ TEXTS = {
     }
 }
 
-# Данные о продуктах
+# Данные о продуктах (цены в USD)
 PRODUCTS = {
     'Тбилиси': {
-        '0.5 меф': {'price': 100, 'image': 'https://example.com/image1.jpg'},
-        '1.0 меф': {'price': 200, 'image': 'https://example.com/image2.jpg'},
-        '0.5 меф золотой': {'price': 150, 'image': 'https://example.com/image3.jpg'},
-        '0.3 красный': {'price': 100, 'image': 'https://example.com/image4.jpg'}
+        '0.5 меф': {'price': 35, 'image': 'https://example.com/image1.jpg'},
+        '1.0 меф': {'price': 70, 'image': 'https://example.com/image2.jpg'},
+        '0.5 меф золотой': {'price': 50, 'image': 'https://example.com/image3.jpg'},
+        '0.3 красный': {'price': 35, 'image': 'https://example.com/image4.jpg'}
     },
     'Гори': {
-        '0.5 меф': {'price': 100, 'image': 'https://example.com/image1.jpg'},
-        '1.0 меф': {'price': 200, 'image': 'https://example.com/image2.jpg'}
+        '0.5 меф': {'price': 35, 'image': 'https://example.com/image1.jpg'},
+        '1.0 меф': {'price': 70, 'image': 'https://example.com/image2.jpg'}
     },
     'Кутаиси': {
-        '0.5 меф': {'price': 100, 'image': 'https://example.com/image1.jpg'},
-        '1.0 меф': {'price': 200, 'image': 'https://example.com/image2.jpg'}
+        '0.5 меф': {'price': 35, 'image': 'https://example.com/image1.jpg'},
+        '1.0 меф': {'price': 70, 'image': 'https://example.com/image2.jpg'}
     },
     'Батуми': {
-        '0.5 меф': {'price': 100, 'image': 'https://example.com/image1.jpg'},
-        '1.0 меф': {'price': 200, 'image': 'https://example.com/image2.jpg'}
+        '0.5 меф': {'price': 35, 'image': 'https://example.com/image1.jpg'},
+        '1.0 меф': {'price': 70, 'image': 'https://example.com/image2.jpg'}
     }
 }
 
@@ -370,7 +370,7 @@ DELIVERY_TYPES = ['Подъезд', 'Прикоп', 'Магнит', 'Во дво
 # Доступные криптовалюты
 CRYPTO_CURRENCIES = {
     'BTC': 'Bitcoin',
-    'ETH': 'Ethereum',
+    'ETH': 'Ehereum',
     'USDT': 'Tether (TRC20)',
     'LTC': 'Litecoin'
 }
@@ -632,7 +632,7 @@ async def show_main_menu(update, context, user_id, lang):
         [InlineKeyboardButton("Кутаиси", callback_data="city_Кутаиси")],
         [InlineKeyboardButton("Батуми", callback_data="city_Батуми")],
         [
-            InlineKeyboardButton(f"💰 Баланс: {user['balance'] or 0} лари", callback_data="balance"),
+            InlineKeyboardButton(f"💰 Баланс: {user['balance'] or 0}$", callback_data="balance"),
             InlineKeyboardButton("📦 Последний заказ", callback_data="last_order")
         ],
         [
@@ -707,7 +707,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if last_order:
             order_text = (
                 f"📦 Товар: {last_order['product']}\n"
-                f"💵 Стоимость: {last_order['price']} лари\n"
+                f"💵 Стоимость: {last_order['price']}$\n"
                 f"🏙 Район: {last_order['district']}\n"
                 f"🚚 Тип доставки: {last_order['delivery_type']}\n"
                 f"🕐 Время заказа: {last_order['purchase_time']}\n"
@@ -1060,13 +1060,17 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
         # Получаем адрес кошелька из ответа
         address = invoice['result'].get('address', '')
         
-        # Если адреса нет, используем payment_url как запасной вариант
         if not address:
-            address = payment_url
-            logger.warning(f"No address returned for invoice {invoice_uuid}, using payment URL")
+            logger.error(f"No address in invoice response: {invoice}")
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=get_text(lang, 'error')
+            )
+            context.user_data['last_message_id'] = message.message_id
+            return CRYPTO_CURRENCY
         
-        # Генерируем URL для QR-кода (по документации CryptoCloud)
-        qr_code_url = f"https://pay.cryptocloud.plus/qr/{invoice_uuid}"
+        # Генерируем QR-код на основе адреса
+        qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={address}"
         
         expires_at = datetime.now() + timedelta(minutes=60)
         add_transaction(
@@ -1080,19 +1084,17 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
             invoice_uuid
         )
         
-        # Формируем текст с адресом кошелька и QR-кодом
+        # Формируем текст с адресом кошелька
         payment_text = get_text(
             lang,
             'payment_instructions',
             amount=price,
             currency=crypto_currency,
-            payment_address=address,
-            qr_code=qr_code_url
+            payment_address=address
         )
         
         # Отправляем сообщение с QR-кодом
         try:
-            # Пытаемся отправить изображение QR-кода
             await context.bot.send_photo(
                 chat_id=user_id,
                 photo=qr_code_url,
@@ -1101,14 +1103,13 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
             )
         except Exception as e:
             logger.error(f"Error sending QR code: {e}")
-            # Если не удалось отправить изображение, отправляем текст
             await context.bot.send_message(
                 chat_id=user_id,
                 text=payment_text,
                 parse_mode='Markdown'
             )
         
-        # Запускаем проверку оплаты только если JobQueue доступен
+        # Запускаем проверку оплаты
         if hasattr(context, 'job_queue') and context.job_queue:
             context.job_queue.run_repeating(
                 check_payment,

@@ -26,6 +26,7 @@ import asyncpg
 from asyncpg.pool import Pool
 from threading import Thread
 from flask import Flask, request, jsonify
+import threading
 
 # Импорт функций CryptoCloud
 from cryptocloud import create_cryptocloud_invoice, get_cryptocloud_invoice_status, check_payment_status_periodically, cancel_cryptocloud_invoice
@@ -391,6 +392,54 @@ def get_text(lang, key, **kwargs):
         logger.error(f"Ошибка форматирования текста: {e}, ключ: {key}, аргументы: {kwargs}")
         return text
 
+# Вспомогательная функция для удаления предыдущего сообщения
+async def delete_previous_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
+
+# Поток для проверки pending транзакций
+async def check_pending_transactions_loop():
+    while True:
+        try:
+            transactions = await get_pending_transactions()
+            for transaction in transactions:
+                invoice_uuid = transaction['invoice_uuid']
+                status_info = get_cryptocloud_invoice_status(invoice_uuid)
+                
+                if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
+                    invoice = status_info['result'][0]  # Берем первый счет из массива
+                    invoice_status = invoice['status']
+                    if invoice_status == 'paid':
+                        await update_transaction_status_by_uuid(invoice_uuid, 'paid')
+                        
+                        user_id = transaction['user_id']
+                        product_info = transaction['product_info']
+                        
+                        # Получаем информацию о продукте для изображения
+                        product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
+                        city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
+                        
+                        product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
+                        
+                        if global_bot_app and global_bot_app.loop:
+                            asyncio.run_coroutine_threadsafe(
+                                global_bot_app.bot.send_message(
+                                    chat_id=user_id,
+                                    text=get_text('ru', 'payment_success', product_image=product_image)
+                                ),
+                                global_bot_app.loop
+                            )
+                        
+                    elif invoice_status in ['expired', 'canceled']:
+                        await update_transaction_status_by_uuid(invoice_uuid, invoice_status)
+            
+            await asyncio.sleep(60)  # Проверяем каждые 60 секунд
+        except Exception as e:
+            logger.error(f"Error in check_pending_transactions: {e}")
+            await asyncio.sleep(60)
+
 # Обработчик POSTBACK уведомлений от CryptoCloud
 @postback_app.route('/cryptocloud_postback', methods=['POST'])
 def handle_cryptocloud_postback():
@@ -433,7 +482,11 @@ def handle_cryptocloud_postback():
         # Проверяем, что это успешный платеж
         if status == 'success' and order_id:
             # Обрабатываем в отдельной асинхронной задаче
-            asyncio.run(process_successful_payment(order_id))
+            if global_bot_app and global_bot_app.loop:
+                asyncio.run_coroutine_threadsafe(
+                    process_successful_payment(order_id),
+                    global_bot_app.loop
+                )
         
         return jsonify({'status': 'ok'}), 200
         
@@ -490,54 +543,6 @@ async def process_successful_payment(order_id):
     
     except Exception as e:
         logger.error(f"Error processing successful payment: {e}")
-
-# Вспомогательная функция для удаления предыдущего сообщения
-async def delete_previous_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
-        logger.error(f"Error deleting message: {e}")
-
-# Поток для проверки pending транзакций
-async def check_pending_transactions_loop(app):
-    while True:
-        try:
-            transactions = await get_pending_transactions()
-            for transaction in transactions:
-                invoice_uuid = transaction['invoice_uuid']
-                status_info = get_cryptocloud_invoice_status(invoice_uuid)
-                
-                if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
-                    invoice = status_info['result'][0]  # Берем первый счет из массива
-                    invoice_status = invoice['status']
-                    if invoice_status == 'paid':
-                        await update_transaction_status_by_uuid(invoice_uuid, 'paid')
-                        
-                        user_id = transaction['user_id']
-                        product_info = transaction['product_info']
-                        
-                        # Получаем информацию о продукте для изображения
-                        product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
-                        city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
-                        
-                        product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
-                        
-                        if app.loop:
-                            asyncio.run_coroutine_threadsafe(
-                                app.bot.send_message(
-                                    chat_id=user_id,
-                                    text=get_text('ru', 'payment_success', product_image=product_image)
-                                ),
-                                app.loop
-                            )
-                        
-                    elif invoice_status in ['expired', 'canceled']:
-                        await update_transaction_status_by_uuid(invoice_uuid, invoice_status)
-            
-            await asyncio.sleep(60)  # Проверяем каждые 60 секунд
-        except Exception as e:
-            logger.error(f"Error in check_pending_transactions: {e}")
-            await asyncio.sleep(60)
 
 # Обработчики команд и состояний
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1302,15 +1307,12 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_postback_server():
     """Запускает сервер для обработки POSTBACK уведомлений"""
     port = int(os.environ.get('POSTBACK_PORT', 5001))
-    postback_app.run(host='0.0.0.0', port=port, debug=False)
+    postback_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-async def main():
-    global global_bot_app
+def main():
+    global global_bot_app, db_pool
     
-    # Инициализация базы данных
-    await init_db()
-    
-    # Создаем Application с JobQueue
+    # Создаем и настраиваем приложение
     application = (
         Application.builder()
         .token(TOKEN)
@@ -1319,6 +1321,12 @@ async def main():
     )
     global_bot_app = application
     
+    # Инициализируем базу данных синхронно
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(init_db())
+    
+    # Создаем обработчики
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start), CommandHandler('menu', menu_command)],
         states={
@@ -1341,7 +1349,7 @@ async def main():
     application.add_error_handler(error)
     
     # Запускаем проверку pending транзакций в отдельной асинхронной задаче
-    asyncio.create_task(check_pending_transactions_loop(application))
+    loop.create_task(check_pending_transactions_loop())
     
     # Запускаем сервер для обработки POSTBACK уведомлений в отдельном потоке
     Thread(target=run_postback_server, daemon=True).start()
@@ -1354,7 +1362,7 @@ async def main():
         # На Render - используем вебхуки
         webhook_url = os.environ.get('RENDER_EXTERNAL_URL', '')
         if webhook_url:
-            await application.run_webhook(
+            application.run_webhook(
                 listen="0.0.0.0",
                 port=port,
                 url_path=TOKEN,
@@ -1362,10 +1370,10 @@ async def main():
                 drop_pending_updates=True
             )
         else:
-            await application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+            application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     else:
         # Локально - используем поллинг
-        await application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()

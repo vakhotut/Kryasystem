@@ -2,6 +2,10 @@ import requests
 import os
 import time
 from datetime import datetime, timedelta
+import logging
+
+# Настройка логирования
+logger = logging.getLogger(__name__)
 
 CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY")
 CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID")
@@ -11,7 +15,7 @@ def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=None):
     Создание инвойса в CryptoCloud
     
     :param amount: Сумма в USD
-    :param crypto_currency: Криптовалюта (BTC, ETH, USDT, LTC и др.)
+    :param crypto_currency: Криптовалюта (BTC, ETH, USDT_TRC20, LTC и др.)
     :param order_id: Уникальный идентификатор заказа
     :param email: Email плательщика (опционально)
     :return: Ответ API CryptoCloud
@@ -23,13 +27,23 @@ def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=None):
         "Content-Type": "application/json"
     }
     
+    # Преобразуем общие названия валют в конкретные форматы CryptoCloud
+    crypto_mapping = {
+        'BTC': 'BTC',
+        'ETH': 'ETH', 
+        'USDT': 'USDT_TRC20',  # По умолчанию используем TRC20 для USDT
+        'LTC': 'LTC'
+    }
+    
+    crypto_code = crypto_mapping.get(crypto_currency, crypto_currency)
+    
     data = {
         "shop_id": CRYPTOCLOUD_SHOP_ID,
         "amount": amount,
-        "currency": "USD",  # Фиатная валюта всегда USD
+        "currency": "USD",
         "order_id": order_id,
         "add_fields": {
-            "cryptocurrency": crypto_currency  # Криптовалюта для оплаты
+            "cryptocurrency": crypto_code  # Конкретная криптовалюта для оплаты
         }
     }
     
@@ -41,17 +55,19 @@ def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=None):
         response.raise_for_status()
         result = response.json()
         
-        # Проверяем статус ответа
+        # Добавляем логирование для отладки
+        logger.info(f"CryptoCloud invoice response: {result}")
+        
         if result.get('status') == 'success':
             return result
         else:
-            print(f"CryptoCloud API error: {result}")
+            logger.error(f"CryptoCloud API error: {result}")
             return None
             
     except requests.exceptions.RequestException as e:
-        print(f"Error creating CryptoCloud invoice: {e}")
+        logger.error(f"Error creating CryptoCloud invoice: {e}")
         if hasattr(e, 'response') and e.response:
-            print(f"Response content: {e.response.text}")
+            logger.error(f"Response content: {e.response.text}")
         return None
 
 def get_cryptocloud_invoice_status(uuids):
@@ -80,9 +96,9 @@ def get_cryptocloud_invoice_status(uuids):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Error getting CryptoCloud invoice status: {e}")
+        logger.error(f"Error getting CryptoCloud invoice status: {e}")
         if hasattr(e, 'response') and e.response:
-            print(f"Response content: {e.response.text}")
+            logger.error(f"Response content: {e.response.text}")
         return None
 
 def cancel_cryptocloud_invoice(invoice_uuid):
@@ -108,9 +124,9 @@ def cancel_cryptocloud_invoice(invoice_uuid):
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Error canceling CryptoCloud invoice: {e}")
+        logger.error(f"Error canceling CryptoCloud invoice: {e}")
         if hasattr(e, 'response') and e.response:
-            print(f"Response content: {e.response.text}")
+            logger.error(f"Response content: {e.response.text}")
         return None
 
 def check_payment_status_periodically(invoice_uuid, max_checks=60, interval=60):

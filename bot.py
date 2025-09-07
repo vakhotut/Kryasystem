@@ -1051,40 +1051,46 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
     order_id = f"order_{int(time.time())}_{user_id}"
     price_usd = price  # если цена уже в USD
     
-    invoice = create_cryptocloud_invoice(price_usd, crypto_currency, order_id)
-    
-    if invoice and invoice.get('status') == 'success':
-        invoice_uuid = invoice['result']['uuid']
-        payment_url = invoice['result']['link']
-        
-        # Получаем адрес кошелька из ответа
-        address = invoice['result'].get('address', '')
-        
-        if not address:
-            logger.error(f"No address in invoice response: {invoice}")
-            message = await context.bot.send_message(
-                chat_id=user_id,
-                text=get_text(lang, 'error')
-            )
-            context.user_data['last_message_id'] = message.message_id
-            return CRYPTO_CURRENCY
-        
-        # Генерируем QR-код на основе адреса
-        qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={address}"
-        
-        expires_at = datetime.now() + timedelta(minutes=60)
-        add_transaction(
-            user_id,
-            price,
-            crypto_currency,
-            order_id,
-            payment_url,
-            expires_at,
-            product_info,
-            invoice_uuid
-        )
-        
-        # Формируем текст с адресом кошелька
+    invoice_resp = create_cryptocloud_invoice(price_usd, crypto_currency, order_id)
+
+    if not invoice_resp:
+        logger.error("create_cryptocloud_invoice returned None")
+        await context.bot.send_message(chat_id=user_id, text=get_text(lang, 'error'))
+        return CRYPTO_CURRENCY
+
+    # проверяем статус и результат
+    if invoice_resp.get('status') != 'success' or not invoice_resp.get('result'):
+        logger.error(f"Invoice creation failed: {invoice_resp}")
+        await context.bot.send_message(chat_id=user_id, text=get_text(lang, 'error'))
+        return CRYPTO_CURRENCY
+
+    invoice_data = invoice_resp['result']
+    invoice_uuid = invoice_data.get('uuid')
+    payment_url = invoice_data.get('link') or invoice_data.get('pay_url')  # разные версии API
+
+    # Попытка получить адрес
+    address = invoice_data.get('address') or ''
+    # Если адрес всё ещё пустой — попробуем дополнительный запрос статуса (если ещё не делали)
+    if not address and invoice_uuid:
+        info = get_cryptocloud_invoice_status(invoice_uuid)
+        if info and info.get('status') == 'success' and len(info.get('result', [])) > 0:
+            address = info['result'][0].get('address', '') or ''
+
+    # Сохраняем информацию о транзакции
+    expires_at = datetime.now() + timedelta(minutes=60)
+    add_transaction(
+        user_id,
+        price,
+        crypto_currency,
+        order_id,
+        payment_url,
+        expires_at,
+        product_info,
+        invoice_uuid
+    )
+
+    if address:
+        qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={address}"
         payment_text = get_text(
             lang,
             'payment_instructions',
@@ -1092,8 +1098,6 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
             currency=crypto_currency,
             payment_address=address
         )
-        
-        # Отправляем сообщение с QR-кодом
         try:
             await context.bot.send_photo(
                 chat_id=user_id,
@@ -1108,38 +1112,31 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
                 text=payment_text,
                 parse_mode='Markdown'
             )
-        
-        # Запускаем проверку оплаты
-        if hasattr(context, 'job_queue') and context.job_queue:
-            context.job_queue.run_repeating(
-                check_payment,
-                interval=60,
-                first=60,
-                context={
-                    'user_id': user_id,
-                    'order_id': order_id,
-                    'invoice_uuid': invoice_uuid,
-                    'chat_id': user_id,
-                    'product_info': product_info,
-                    'lang': lang
-                }
-            )
-        else:
-            logger.warning("JobQueue is not available, payment checking won't be scheduled")
-        
-        return PAYMENT
     else:
-        error_msg = "Ошибка при создании инвойса"
-        if invoice:
-            error_msg += f": {invoice.get('error', 'Unknown error')}"
-        logger.error(error_msg)
-        
-        message = await context.bot.send_message(
-            chat_id=user_id,
-            text=get_text(lang, 'error')
+        # Если адрес всё ещё не пришёл — уведомляем и показываем ссылку (как fallback) и логируем
+        logger.error(f"No address generated for invoice: {invoice_resp}")
+        fallback_text = f"Не удалось получить адрес напрямую. Откройте страницу оплаты: {payment_url}"
+        await context.bot.send_message(chat_id=user_id, text=fallback_text)
+
+    # Запускаем проверку оплаты
+    if hasattr(context, 'job_queue') and context.job_queue:
+        context.job_queue.run_repeating(
+            check_payment,
+            interval=60,
+            first=60,
+            context={
+                'user_id': user_id,
+                'order_id': order_id,
+                'invoice_uuid': invoice_uuid,
+                'chat_id': user_id,
+                'product_info': product_info,
+                'lang': lang
+            }
         )
-        context.user_data['last_message_id'] = message.message_id
-        return CRYPTO_CURRENCY
+    else:
+        logger.warning("JobQueue is not available, payment checking won't be scheduled")
+    
+    return PAYMENT
 
 async def check_payment(context: ContextTypes.DEFAULT_TYPE):
     try:

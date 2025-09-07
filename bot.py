@@ -48,6 +48,9 @@ CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, 
 # Создаем Flask приложение для обработки POSTBACK
 postback_app = Flask(__name__)
 
+# Глобальная переменная для хранения приложения бота
+global_bot_app = None
+
 # Инициализация базы данных
 def init_db():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -87,6 +90,13 @@ def init_db():
         FOREIGN KEY (user_id) REFERENCES users (user_id)
     )
     ''')
+    
+    # Проверяем существование столбца invoice_uuid и добавляем его, если нет
+    try:
+        cursor.execute("SELECT invoice_uuid FROM transactions LIMIT 1")
+    except psycopg2.Error as e:
+        conn.rollback()
+        cursor.execute('ALTER TABLE transactions ADD COLUMN invoice_uuid TEXT')
     
     # Таблица покупок
     cursor.execute('''
@@ -506,13 +516,14 @@ def handle_cryptocloud_postback():
                 product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
                 
                 # Отправляем уведомление пользователю
-                asyncio.run_coroutine_threadsafe(
-                    application.bot.send_message(
-                        chat_id=user_id,
-                        text=get_text(lang, 'payment_success', product_image=product_image)
-                    ),
-                    application.loop
-                )
+                if global_bot_app:
+                    asyncio.run_coroutine_threadsafe(
+                        global_bot_app.bot.send_message(
+                            chat_id=user_id,
+                            text=get_text(lang, 'payment_success', product_image=product_image)
+                        ),
+                        global_bot_app.loop
+                    )
                 
                 logger.info(f"Successfully processed postback for order {order_id}")
         
@@ -1284,7 +1295,9 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to send error message: {e}")
 
 def main():
+    global global_bot_app
     application = Application.builder().token(TOKEN).build()
+    global_bot_app = application
     
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start), CommandHandler('menu', menu_command)],

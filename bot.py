@@ -322,7 +322,7 @@ TEXTS = {
         'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
         'balance': 'თქვენი ბალანსი: {balance} ლარი',
         'balance_add': 'შეიყვანეთ ბალანსის შევსების რაოდენობა:',
-        'balance_add_success': 'ბალანსი შეივსო {amount} ლარით. მიმდინარე ბალანსი: {balance} ლარი',
+        'balance_add_success': 'ბალანსი შეივსო {amount} ლარით. მიმდინარე ბալანსი: {balance} ლარი',
         'support': 'ყველა კითხვისთვის დაუკავშირდით @support_username',
         'bonuses': 'ბონუს სისტემა:\n- ყოველ მე-5 ყიდვაზე 10% ფასდაკლება\n- მოიწვიე მეგობარი და მიიღე 50 ლარი ბალანსზე',
         'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 60 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
@@ -1049,9 +1049,6 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
     
     # Создаем заказ в CryptoCloud
     order_id = f"order_{int(time.time())}_{user_id}"
-    
-    # Конвертируем цену в USD (если нужно)
-    # price_usd = price / USD_TO_GEL_RATE  # если используется конвертация
     price_usd = price  # если цена уже в USD
     
     invoice = create_cryptocloud_invoice(price_usd, crypto_currency, order_id)
@@ -1059,8 +1056,17 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
     if invoice and invoice.get('status') == 'success':
         invoice_uuid = invoice['result']['uuid']
         payment_url = invoice['result']['link']
-        qr_code = invoice['result'].get('qr_code', '')  # Получаем QR-код
-        address = invoice['result'].get('address', '')  # Получаем адрес кошелька
+        
+        # Получаем адрес кошелька из ответа
+        address = invoice['result'].get('address', '')
+        
+        # Если адреса нет, используем payment_url как запасной вариант
+        if not address:
+            address = payment_url
+            logger.warning(f"No address returned for invoice {invoice_uuid}, using payment URL")
+        
+        # Генерируем URL для QR-кода (по документации CryptoCloud)
+        qr_code_url = f"https://pay.cryptocloud.plus/qr/{invoice_uuid}"
         
         expires_at = datetime.now() + timedelta(minutes=60)
         add_transaction(
@@ -1074,55 +1080,51 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
             invoice_uuid
         )
         
-        # Формируем текст с QR-кодом
+        # Формируем текст с адресом кошелька и QR-кодом
         payment_text = get_text(
             lang,
             'payment_instructions',
             amount=price,
             currency=crypto_currency,
-            payment_address=address or payment_url,  # Используем адрес кошелька или ссылку
-            qr_code=qr_code
+            payment_address=address,
+            qr_code=qr_code_url
         )
         
         # Отправляем сообщение с QR-кодом
-        if qr_code:
-            try:
-                # Сначала отправляем изображение QR-кода
-                await context.bot.send_photo(
-                    chat_id=user_id,
-                    photo=qr_code,
-                    caption=payment_text,
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.error(f"Error sending QR code: {e}")
-                # Если не удалось отправить изображение, отправляем текст
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=payment_text,
-                    parse_mode='Markdown'
-                )
-        else:
+        try:
+            # Пытаемся отправить изображение QR-кода
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=qr_code_url,
+                caption=payment_text,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error sending QR code: {e}")
+            # Если не удалось отправить изображение, отправляем текст
             await context.bot.send_message(
                 chat_id=user_id,
                 text=payment_text,
                 parse_mode='Markdown'
             )
         
-        # Запускаем проверку оплаты
-        context.job_queue.run_repeating(
-            check_payment,
-            interval=60,
-            first=60,
-            context={
-                'user_id': user_id,
-                'order_id': order_id,
-                'invoice_uuid': invoice_uuid,
-                'chat_id': user_id,
-                'product_info': product_info,
-                'lang': lang
-            }
-        )
+        # Запускаем проверку оплаты только если JobQueue доступен
+        if hasattr(context, 'job_queue') and context.job_queue:
+            context.job_queue.run_repeating(
+                check_payment,
+                interval=60,
+                first=60,
+                context={
+                    'user_id': user_id,
+                    'order_id': order_id,
+                    'invoice_uuid': invoice_uuid,
+                    'chat_id': user_id,
+                    'product_info': product_info,
+                    'lang': lang
+                }
+            )
+        else:
+            logger.warning("JobQueue is not available, payment checking won't be scheduled")
         
         return PAYMENT
     else:
@@ -1139,68 +1141,71 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
         return CRYPTO_CURRENCY
 
 async def check_payment(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    invoice_uuid = job.context['invoice_uuid']
-    user_id = job.context['user_id']
-    chat_id = job.context['chat_id']
-    lang = job.context['lang']
-    product_info = job.context['product_info']
-    
-    status_info = get_cryptocloud_invoice_status(invoice_uuid)
-    
-    if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
-        invoice = status_info['result'][0]  # Берем первый счет из массива
-        invoice_status = invoice['status']
-        if invoice_status == 'paid':
-            # Оплата получена
-            price = invoice['amount_usd']
-            
-            add_purchase(
-                user_id,
-                product_info,
-                price,
-                '',
-                ''
-            )
-            
-            # Получаем изображение товара
-            product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
-            city = product_info.split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
-            
-            product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
-            
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=get_text(lang, 'payment_success', product_image=product_image)
-            )
-            
-            update_transaction_status_by_uuid(invoice_uuid, 'paid')
-            
-            # Останавливаем задачу
-            job.schedule_removal()
-        elif invoice_status in ['expired', 'canceled']:
-            # Инвойс просрочен или отменен
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=get_text(lang, 'payment_timeout')
-            )
-            
-            user = get_user(user_id)
-            failed_payments = user['failed_payments'] + 1
-            update_user(user_id, failed_payments=failed_payments)
-            
-            if failed_payments >= 3:
-                ban_until = datetime.now() + timedelta(hours=24)
-                update_user(user_id, ban_until=ban_until.strftime('%Y-%m-%d %H:%M:%S'))
+    try:
+        job = context.job
+        invoice_uuid = job.context['invoice_uuid']
+        user_id = job.context['user_id']
+        chat_id = job.context['chat_id']
+        lang = job.context['lang']
+        product_info = job.context['product_info']
+        
+        status_info = get_cryptocloud_invoice_status(invoice_uuid)
+        
+        if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
+            invoice = status_info['result'][0]
+            invoice_status = invoice['status']
+            if invoice_status == 'paid':
+                # Оплата получена
+                price = invoice['amount_usd']
+                
+                add_purchase(
+                    user_id,
+                    product_info,
+                    price,
+                    '',
+                    ''
+                )
+                
+                # Получаем изображение товара
+                product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
+                city = product_info.split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
+                
+                product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
+                
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=get_text(lang, 'ban_message')
+                    text=get_text(lang, 'payment_success', product_image=product_image)
                 )
-            
-            update_transaction_status_by_uuid(invoice_uuid, invoice_status)
-            
-            # Останавливаем задачу
-            job.schedule_removal()
+                
+                update_transaction_status_by_uuid(invoice_uuid, 'paid')
+                
+                # Останавливаем задачу
+                job.schedule_removal()
+            elif invoice_status in ['expired', 'canceled']:
+                # Инвойс просрочен или отменен
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=get_text(lang, 'payment_timeout')
+                )
+                
+                user = get_user(user_id)
+                failed_payments = user['failed_payments'] + 1
+                update_user(user_id, failed_payments=failed_payments)
+                
+                if failed_payments >= 3:
+                    ban_until = datetime.now() + timedelta(hours=24)
+                    update_user(user_id, ban_until=ban_until.strftime('%Y-%m-%d %H:%M:%S'))
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=get_text(lang, 'ban_message')
+                    )
+                
+                update_transaction_status_by_uuid(invoice_uuid, invoice_status)
+                
+                # Останавливаем задачу
+                job.schedule_removal()
+    except Exception as e:
+        logger.error(f"Error in check_payment: {e}")
 
 async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
@@ -1298,7 +1303,13 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     global global_bot_app
-    application = Application.builder().token(TOKEN).build()
+    # Явно создаем Application с JobQueue
+    application = (
+        Application.builder()
+        .token(TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
     global_bot_app = application
     
     conv_handler = ConversationHandler(

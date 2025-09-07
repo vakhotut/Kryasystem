@@ -5,3 +5,4 @@ requests==2.28.1
 psycopg2-binary
 python-dotenv
 flask==2.3.3
+APScheduler==3.10.4

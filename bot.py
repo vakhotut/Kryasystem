@@ -3,6 +3,8 @@ import random
 import time
 import asyncio
 import os
+import hmac
+import hashlib
 from datetime import datetime, timedelta
 from telegram import (
     Update,
@@ -20,9 +22,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes
 )
-import requests
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import asyncpg
+from asyncpg.pool import Pool
 from threading import Thread
 from flask import Flask, request, jsonify
 
@@ -41,6 +42,7 @@ TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY", "YOUR_CRYPTOCLOUD_API_KEY")
 CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID", "YOUR_CRYPTOCLOUD_SHOP_ID")
 DATABASE_URL = os.environ['DATABASE_URL']
+POSTBACK_SECRET = os.getenv("POSTBACK_SECRET", CRYPTOCLOUD_API_KEY)  # Секрет для проверки подписи
 
 # Состояния разговора
 CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, CRYPTO_CURRENCY, PAYMENT, BALANCE = range(11)
@@ -48,148 +50,146 @@ CAPTCHA, LANGUAGE, MAIN_MENU, CITY, CATEGORY, DISTRICT, DELIVERY, CONFIRMATION, 
 # Создаем Flask приложение для обработки POSTBACK
 postback_app = Flask(__name__)
 
-# Глобальная переменная для хранения приложения бота
+# Глобальная переменная для хранения приложения бота и пула БД
 global_bot_app = None
+db_pool: Pool = None
+
+# Белый список разрешенных колонок для обновления
+ALLOWED_USER_COLUMNS = {
+    'username', 'first_name', 'language', 'captcha_passed',
+    'ban_until', 'failed_payments', 'purchase_count', 'discount', 'balance'
+}
 
 # Инициализация базы данных
-def init_db():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
+async def init_db():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
     
-    # Таблица пользователей
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id BIGINT PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        language TEXT DEFAULT 'ru',
-        captcha_passed INTEGER DEFAULT 0,
-        ban_until TIMESTAMP NULL,
-        failed_payments INTEGER DEFAULT 0,
-        purchase_count INTEGER DEFAULT 0,
-        discount INTEGER DEFAULT 0,
-        balance REAL DEFAULT 0.0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Таблица транзакций
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS transactions (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT,
-        amount REAL,
-        currency TEXT,
-        status TEXT,
-        order_id TEXT,
-        payment_url TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        expires_at TIMESTAMP,
-        product_info TEXT,
-        invoice_uuid TEXT,
-        FOREIGN KEY (user_id) REFERENCES users (user_id)
-    )
-    ''')
-    
-    # Проверяем существование столбца invoice_uuid и добавляем его, если нет
-    try:
-        cursor.execute("SELECT invoice_uuid FROM transactions LIMIT 1")
-    except psycopg2.Error as e:
-        conn.rollback()
-        cursor.execute('ALTER TABLE transactions ADD COLUMN invoice_uuid TEXT')
-        logger.info("Added invoice_uuid column to transactions table")
-    
-    # Таблица покупок
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS purchases (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT,
-        product TEXT,
-        price REAL,
-        district TEXT,
-        delivery_type TEXT,
-        purchase_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        status TEXT DEFAULT 'completed',
-        FOREIGN KEY (user_id) REFERENCES users (user_id)
-    )
-    ''')
-    
-    conn.commit()
-    conn.close()
+    async with db_pool.acquire() as conn:
+        # Таблица пользователей
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            language TEXT DEFAULT 'ru',
+            captcha_passed INTEGER DEFAULT 0,
+            ban_until TIMESTAMP NULL,
+            failed_payments INTEGER DEFAULT 0,
+            purchase_count INTEGER DEFAULT 0,
+            discount INTEGER DEFAULT 0,
+            balance REAL DEFAULT 0.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # Таблица транзакций
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            amount REAL,
+            currency TEXT,
+            status TEXT,
+            order_id TEXT,
+            payment_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP,
+            product_info TEXT,
+            invoice_uuid TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+        ''')
+        
+        # Проверяем существование столбца invoice_uuid и добавляем его, если нет
+        try:
+            await conn.execute("SELECT invoice_uuid FROM transactions LIMIT 1")
+        except Exception as e:
+            await conn.execute('ALTER TABLE transactions ADD COLUMN invoice_uuid TEXT')
+            logger.info("Added invoice_uuid column to transactions table")
+        
+        # Таблица покупок
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS purchases (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            product TEXT,
+            price REAL,
+            district TEXT,
+            delivery_type TEXT,
+            purchase_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'completed',
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+        ''')
 
 # Функции для работы с базой данных
-def get_user(user_id):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
-    user = cursor.fetchone()
-    conn.close()
-    return user
+async def get_user(user_id):
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow('SELECT * FROM users WHERE user_id = $1', user_id)
 
-def update_user(user_id, **kwargs):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
+async def update_user(user_id, **kwargs):
+    # Фильтруем только разрешенные колонки
+    valid_updates = {k: v for k, v in kwargs.items() if k in ALLOWED_USER_COLUMNS}
+    if not valid_updates:
+        return
+        
+    set_clause = ", ".join([f"{k} = ${i+2}" for i, k in enumerate(valid_updates.keys())])
+    values = list(valid_updates.values()) + [user_id]
     
-    for key, value in kwargs.items():
-        cursor.execute(f'UPDATE users SET {key} = %s WHERE user_id = %s', (value, user_id))
-    
-    conn.commit()
-    conn.close()
+    async with db_pool.acquire() as conn:
+        await conn.execute(f'UPDATE users SET {set_clause} WHERE user_id = ${len(values)}', *values)
 
-def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ''', (user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid))
-    
-    conn.commit()
-    conn.close()
+async def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid):
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+        INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid)
 
-def add_purchase(user_id, product, price, district, delivery_type):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    INSERT INTO purchases (user_id, product, price, district, delivery_type)
-    VALUES (%s, %s, %s, %s, %s)
-    ''', (user_id, product, price, district, delivery_type))
-    
-    # Обновляем счетчик покупок
-    cursor.execute('SELECT purchase_count FROM users WHERE user_id = %s', (user_id,))
-    result = cursor.fetchone()
-    purchase_count = result[0] + 1 if result else 1
-    cursor.execute('UPDATE users SET purchase_count = %s WHERE user_id = %s', (purchase_count, user_id))
-    
-    conn.commit()
-    conn.close()
+async def add_purchase(user_id, product, price, district, delivery_type):
+    async with db_pool.acquire() as conn:
+        # Атомарное обновление счетчика покупок
+        await conn.execute('''
+        WITH new_purchase AS (
+            INSERT INTO purchases (user_id, product, price, district, delivery_type)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING user_id
+        )
+        UPDATE users 
+        SET purchase_count = purchase_count + 1 
+        WHERE user_id = $1
+        ''', user_id, product, price, district, delivery_type)
 
-def get_pending_transactions():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute('SELECT * FROM transactions WHERE status = %s AND expires_at > NOW()', ('pending',))
-    transactions = cursor.fetchall()
-    conn.close()
-    return transactions
+async def get_pending_transactions():
+    async with db_pool.acquire() as conn:
+        return await conn.fetch('SELECT * FROM transactions WHERE status = $1 AND expires_at > NOW()', 'pending')
 
-def update_transaction_status(order_id, status):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
-    cursor.execute('UPDATE transactions SET status = %s WHERE order_id = %s', (status, order_id))
-    conn.commit()
-    conn.close()
+async def update_transaction_status(order_id, status):
+    async with db_pool.acquire() as conn:
+        await conn.execute('UPDATE transactions SET status = $1 WHERE order_id = $2', status, order_id)
 
-def update_transaction_status_by_uuid(invoice_uuid, status):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor()
-    cursor.execute('UPDATE transactions SET status = %s WHERE invoice_uuid = %s', (status, invoice_uuid))
-    conn.commit()
-    conn.close()
+async def update_transaction_status_by_uuid(invoice_uuid, status):
+    async with db_pool.acquire() as conn:
+        await conn.execute('UPDATE transactions SET status = $1 WHERE invoice_uuid = $2', status, invoice_uuid)
 
-# Инициализация базы данных при запуске
-init_db()
+async def get_last_order(user_id):
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow('SELECT * FROM purchases WHERE user_id = $1 ORDER BY purchase_time DESC LIMIT 1', user_id)
+
+# Функция для проверки бана пользователя
+async def is_banned(user_id):
+    user = await get_user(user_id)
+    if user and user['ban_until']:
+        try:
+            ban_until = user['ban_until']
+            if isinstance(ban_until, str):
+                ban_until = datetime.strptime(ban_until, '%Y-%m-%d %H:%M:%S')
+            if ban_until > datetime.now():
+                return True
+        except ValueError:
+            return False
+    return False
 
 # Тексты на разных языках (обновлены для USD)
 TEXTS = {
@@ -391,82 +391,28 @@ def get_text(lang, key, **kwargs):
         logger.error(f"Ошибка форматирования текста: {e}, ключ: {key}, аргументы: {kwargs}")
         return text
 
-# Функция для проверки бана пользователя
-def is_banned(user_id):
-    user = get_user(user_id)
-    if user and user['ban_until']:
-        try:
-            ban_until = user['ban_until']
-            if isinstance(ban_until, str):
-                ban_until = datetime.strptime(ban_until, '%Y-%m-%d %H:%M:%S')
-            if ban_until > datetime.now():
-                return True
-        except ValueError:
-            return False
-    return False
-
-# Функция для получения последнего заказа пользователя
-def get_last_order(user_id):
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute('SELECT * FROM purchases WHERE user_id = %s ORDER BY purchase_time DESC LIMIT 1', (user_id,))
-    order = cursor.fetchone()
-    conn.close()
-    return order
-
-# Поток для проверки pending транзакций
-def check_pending_transactions(app):
-    while True:
-        try:
-            transactions = get_pending_transactions()
-            for transaction in transactions:
-                invoice_uuid = transaction['invoice_uuid']
-                status_info = get_cryptocloud_invoice_status(invoice_uuid)
-                
-                if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
-                    invoice = status_info['result'][0]  # Берем первый счет из массива
-                    invoice_status = invoice['status']
-                    if invoice_status == 'paid':
-                        update_transaction_status_by_uuid(invoice_uuid, 'paid')
-                        
-                        user_id = transaction['user_id']
-                        product_info = transaction['product_info']
-                        
-                        # Получаем информацию о продукте для изображения
-                        product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
-                        city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
-                        
-                        product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
-                        
-                        asyncio.run_coroutine_threadsafe(
-                            app.bot.send_message(
-                                chat_id=user_id,
-                                text=get_text('ru', 'payment_success', product_image=product_image)
-                            ),
-                            app.loop
-                        )
-                        
-                    elif invoice_status in ['expired', 'canceled']:
-                        update_transaction_status_by_uuid(invoice_uuid, invoice_status)
-            
-            time.sleep(60)  # Проверяем каждые 60 секунд
-        except Exception as e:
-            logger.error(f"Error in check_pending_transactions: {e}")
-            time.sleep(60)
-
-# Вспомогательная функция для удаления предыдущего сообщения
-async def delete_previous_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
-        logger.error(f"Error deleting message: {e}")
-
 # Обработчик POSTBACK уведомлений от CryptoCloud
 @postback_app.route('/cryptocloud_postback', methods=['POST'])
 def handle_cryptocloud_postback():
     try:
         # Получаем данные из POST запроса
         data = request.form.to_dict()
+        
+        # Проверяем подпись (если предоставлена)
+        if 'signature' in data:
+            signature = data['signature']
+            # Удаляем подпись из данных для проверки
+            verify_data = data.copy()
+            del verify_data['signature']
+            
+            # Сортируем данные и создаем строку для проверки
+            sorted_data = sorted(verify_data.items())
+            message = "&".join([f"{k}={v}" for k, v in sorted_data]) + POSTBACK_SECRET
+            expected_signature = hashlib.sha256(message.encode()).hexdigest()
+            
+            if not hmac.compare_digest(signature, expected_signature):
+                logger.warning("Invalid signature in CryptoCloud postback")
+                return jsonify({'status': 'error', 'message': 'Invalid signature'}), 403
         
         # Логируем полученные данные для отладки
         logger.info(f"Received CryptoCloud postback: {data}")
@@ -479,54 +425,15 @@ def handle_cryptocloud_postback():
         order_id = data.get('order_id')
         token = data.get('token')
         
+        # Дополнительная проверка токена, если нет подписи
+        if 'signature' not in data and token != POSTBACK_SECRET:
+            logger.warning("Invalid token in CryptoCloud postback")
+            return jsonify({'status': 'error', 'message': 'Invalid token'}), 403
+        
         # Проверяем, что это успешный платеж
         if status == 'success' and order_id:
-            # Находим транзакцию по order_id
-            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute('SELECT * FROM transactions WHERE order_id = %s', (order_id,))
-            transaction = cursor.fetchone()
-            conn.close()
-            
-            if transaction:
-                # Обновляем статус транзакции
-                update_transaction_status(order_id, 'paid')
-                
-                # Добавляем покупку
-                user_id = transaction['user_id']
-                product_info = transaction['product_info']
-                price = transaction['amount']
-                
-                add_purchase(
-                    user_id,
-                    product_info,
-                    price,
-                    '',
-                    ''
-                )
-                
-                # Получаем информацию о продукте
-                product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
-                city = product_info.split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
-                
-                # Получаем пользователя для определения языка
-                user = get_user(user_id)
-                lang = user['language'] or 'ru' if user else 'ru'
-                
-                # Получаем изображение товара
-                product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
-                
-                # Отправляем уведомление пользователю
-                if global_bot_app:
-                    asyncio.run_coroutine_threadsafe(
-                        global_bot_app.bot.send_message(
-                            chat_id=user_id,
-                            text=get_text(lang, 'payment_success', product_image=product_image)
-                        ),
-                        global_bot_app.loop
-                    )
-                
-                logger.info(f"Successfully processed postback for order {order_id}")
+            # Обрабатываем в отдельной асинхронной задаче
+            asyncio.run(process_successful_payment(order_id))
         
         return jsonify({'status': 'ok'}), 200
         
@@ -534,21 +441,117 @@ def handle_cryptocloud_postback():
         logger.error(f"Error processing CryptoCloud postback: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-def run_postback_server():
-    """Запускает сервер для обработки POSTBACK уведомлений"""
-    port = int(os.environ.get('POSTBACK_PORT', 5001))
-    postback_app.run(host='0.0.0.0', port=port, debug=False)
+async def process_successful_payment(order_id):
+    """Асинхронная обработка успешного платежа"""
+    try:
+        # Находим транзакцию по order_id
+        async with db_pool.acquire() as conn:
+            transaction = await conn.fetchrow('SELECT * FROM transactions WHERE order_id = $1', order_id)
+        
+        if transaction:
+            # Обновляем статус транзакции
+            await update_transaction_status(order_id, 'paid')
+            
+            # Добавляем покупку
+            user_id = transaction['user_id']
+            product_info = transaction['product_info']
+            price = transaction['amount']
+            
+            await add_purchase(
+                user_id,
+                product_info,
+                price,
+                '',
+                ''
+            )
+            
+            # Получаем информацию о продукте
+            product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
+            city = product_info.split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
+            
+            # Получаем пользователя для определения языка
+            user = await get_user(user_id)
+            lang = user['language'] or 'ru' if user else 'ru'
+            
+            # Получаем изображение товара
+            product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
+            
+            # Отправляем уведомление пользователю
+            if global_bot_app and global_bot_app.loop:
+                asyncio.run_coroutine_threadsafe(
+                    global_bot_app.bot.send_message(
+                        chat_id=user_id,
+                        text=get_text(lang, 'payment_success', product_image=product_image)
+                    ),
+                    global_bot_app.loop
+                )
+            
+            logger.info(f"Successfully processed postback for order {order_id}")
+    
+    except Exception as e:
+        logger.error(f"Error processing successful payment: {e}")
+
+# Вспомогательная функция для удаления предыдущего сообщения
+async def delete_previous_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
+
+# Поток для проверки pending транзакций
+async def check_pending_transactions_loop(app):
+    while True:
+        try:
+            transactions = await get_pending_transactions()
+            for transaction in transactions:
+                invoice_uuid = transaction['invoice_uuid']
+                status_info = get_cryptocloud_invoice_status(invoice_uuid)
+                
+                if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
+                    invoice = status_info['result'][0]  # Берем первый счет из массива
+                    invoice_status = invoice['status']
+                    if invoice_status == 'paid':
+                        await update_transaction_status_by_uuid(invoice_uuid, 'paid')
+                        
+                        user_id = transaction['user_id']
+                        product_info = transaction['product_info']
+                        
+                        # Получаем информацию о продукте для изображения
+                        product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
+                        city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
+                        
+                        product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
+                        
+                        if app.loop:
+                            asyncio.run_coroutine_threadsafe(
+                                app.bot.send_message(
+                                    chat_id=user_id,
+                                    text=get_text('ru', 'payment_success', product_image=product_image)
+                                ),
+                                app.loop
+                            )
+                        
+                    elif invoice_status in ['expired', 'canceled']:
+                        await update_transaction_status_by_uuid(invoice_uuid, invoice_status)
+            
+            await asyncio.sleep(60)  # Проверяем каждые 60 секунд
+        except Exception as e:
+            logger.error(f"Error in check_pending_transactions: {e}")
+            await asyncio.sleep(60)
 
 # Обработчики команд и состояний
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Сбрасываем состояние пользователя
+    context.user_data.clear()
+    
     user = update.message.from_user
     user_id = user.id
     
-    if is_banned(user_id):
+    if await is_banned(user_id):
         await update.message.reply_text("Вы забанены. Обратитесь к поддержке.")
         return ConversationHandler.END
     
-    existing_user = get_user(user_id)
+    existing_user = await get_user(user_id)
     if existing_user:
         if existing_user['captcha_passed']:
             lang = existing_user['language'] or 'ru'
@@ -569,14 +572,11 @@ async def check_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     user = update.message.from_user
     
     if user_input == context.user_data.get('captcha'):
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        cursor = conn.cursor()
-        cursor.execute(
-            'INSERT INTO users (user_id, username, first_name, captcha_passed) VALUES (%s, %s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET captcha_passed = %s',
-            (user.id, user.username, user.first_name, 1, 1)
-        )
-        conn.commit()
-        conn.close()
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                'INSERT INTO users (user_id, username, first_name, captcha_passed) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO UPDATE SET captcha_passed = $5',
+                user.id, user.username, user.first_name, 1, 1
+            )
         
         keyboard = [
             [InlineKeyboardButton("Русский", callback_data='ru')],
@@ -595,7 +595,7 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     user_id = query.from_user.id
     lang_code = query.data
     
-    update_user(user_id, language=lang_code)
+    await update_user(user_id, language=lang_code)
     
     await query.answer()
     await query.edit_message_text(text=get_text(lang_code, 'language_selected'))
@@ -604,7 +604,7 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return MAIN_MENU
 
 async def show_main_menu(update, context, user_id, lang):
-    user = get_user(user_id)
+    user = await get_user(user_id)
     if not user:
         return
     
@@ -672,7 +672,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     
     user_id = query.from_user.id
-    user_data = get_user(user_id)
+    user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     data = query.data
     
@@ -703,7 +703,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data['last_message_id'] = message.message_id
         return BALANCE
     elif data == 'last_order':
-        last_order = get_last_order(user_id)
+        last_order = await get_last_order(user_id)
         if last_order:
             order_text = (
                 f"📦 Товар: {last_order['product']}\n"
@@ -784,7 +784,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     
     user_id = query.from_user.id
-    user_data = get_user(user_id)
+    user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     data = query.data
     
@@ -828,7 +828,7 @@ async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     
     user_id = query.from_user.id
-    user_data = get_user(user_id)
+    user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     data = query.data
     
@@ -880,7 +880,7 @@ async def handle_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     
     user_id = query.from_user.id
-    user_data = get_user(user_id)
+    user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     data = query.data
     
@@ -949,7 +949,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     
     user_id = query.from_user.id
-    user_data = get_user(user_id)
+    user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     data = query.data
     
@@ -997,7 +997,7 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     
     user_id = query.from_user.id
-    user_data = get_user(user_id)
+    user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     data = query.data
     
@@ -1078,7 +1078,7 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
 
     # Сохраняем информацию о транзакции
     expires_at = datetime.now() + timedelta(minutes=60)
-    add_transaction(
+    await add_transaction(
         user_id,
         price,
         crypto_currency,
@@ -1156,7 +1156,7 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
                 # Оплата получена
                 price = invoice['amount_usd']
                 
-                add_purchase(
+                await add_purchase(
                     user_id,
                     product_info,
                     price,
@@ -1175,7 +1175,7 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
                     text=get_text(lang, 'payment_success', product_image=product_image)
                 )
                 
-                update_transaction_status_by_uuid(invoice_uuid, 'paid')
+                await update_transaction_status_by_uuid(invoice_uuid, 'paid')
                 
                 # Останавливаем задачу
                 job.schedule_removal()
@@ -1186,19 +1186,19 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
                     text=get_text(lang, 'payment_timeout')
                 )
                 
-                user = get_user(user_id)
+                user = await get_user(user_id)
                 failed_payments = user['failed_payments'] + 1
-                update_user(user_id, failed_payments=failed_payments)
+                await update_user(user_id, failed_payments=failed_payments)
                 
                 if failed_payments >= 3:
                     ban_until = datetime.now() + timedelta(hours=24)
-                    update_user(user_id, ban_until=ban_until.strftime('%Y-%m-%d %H:%M:%S'))
+                    await update_user(user_id, ban_until=ban_until.strftime('%Y-%m-%d %H:%M:%S'))
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=get_text(lang, 'ban_message')
                     )
                 
-                update_transaction_status_by_uuid(invoice_uuid, invoice_status)
+                await update_transaction_status_by_uuid(invoice_uuid, invoice_status)
                 
                 # Останавливаем задачу
                 job.schedule_removal()
@@ -1207,7 +1207,7 @@ async def check_payment(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
-    user_data = get_user(user.id)
+    user_data = await get_user(user.id)
     lang = user_data['language'] or 'ru'
     amount_text = update.message.text
     
@@ -1219,7 +1219,7 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         current_balance = user_data['balance'] or 0
         new_balance = current_balance + amount
-        update_user(user.id, balance=new_balance)
+        await update_user(user.id, balance=new_balance)
         
         await update.message.reply_text(
             get_text(lang, 'balance_add_success', amount=amount, balance=new_balance)
@@ -1233,14 +1233,14 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.message.from_user.id
-    user_data = get_user(user_id)
+    user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     await show_main_menu(update, context, user_id, lang)
     return MAIN_MENU
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.message.from_user.id
-    user_data = get_user(user_id)
+    user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     text = update.message.text
     
@@ -1255,7 +1255,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
-    user_data = get_user(user.id)
+    user_data = await get_user(user.id)
     lang = user_data['language'] or 'ru'
     
     await update.message.reply_text("Операция отменена.")
@@ -1289,7 +1289,7 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error("Cannot determine chat_id for error message")
             return
         
-        user_data = get_user(user.id) if user else None
+        user_data = await get_user(user.id) if user else None
         lang = user_data['language'] or 'ru' if user_data else 'ru'
         
         await context.bot.send_message(
@@ -1299,9 +1299,18 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to send error message: {e}")
 
-def main():
+def run_postback_server():
+    """Запускает сервер для обработки POSTBACK уведомлений"""
+    port = int(os.environ.get('POSTBACK_PORT', 5001))
+    postback_app.run(host='0.0.0.0', port=port, debug=False)
+
+async def main():
     global global_bot_app
-    # Явно создаем Application с JobQueue
+    
+    # Инициализация базы данных
+    await init_db()
+    
+    # Создаем Application с JobQueue
     application = (
         Application.builder()
         .token(TOKEN)
@@ -1331,8 +1340,8 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error)
     
-    # Запускаем проверку pending транзакций в отдельном потоке
-    Thread(target=check_pending_transactions, args=(application,), daemon=True).start()
+    # Запускаем проверку pending транзакций в отдельной асинхронной задаче
+    asyncio.create_task(check_pending_transactions_loop(application))
     
     # Запускаем сервер для обработки POSTBACK уведомлений в отдельном потоке
     Thread(target=run_postback_server, daemon=True).start()
@@ -1345,7 +1354,7 @@ def main():
         # На Render - используем вебхуки
         webhook_url = os.environ.get('RENDER_EXTERNAL_URL', '')
         if webhook_url:
-            application.run_webhook(
+            await application.run_webhook(
                 listen="0.0.0.0",
                 port=port,
                 url_path=TOKEN,
@@ -1353,10 +1362,10 @@ def main():
                 drop_pending_updates=True
             )
         else:
-            application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+            await application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     else:
         # Локально - используем поллинг
-        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        await application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())

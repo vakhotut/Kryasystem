@@ -97,6 +97,7 @@ def init_db():
     except psycopg2.Error as e:
         conn.rollback()
         cursor.execute('ALTER TABLE transactions ADD COLUMN invoice_uuid TEXT')
+        logger.info("Added invoice_uuid column to transactions table")
     
     # Таблица покупок
     cursor.execute('''
@@ -223,7 +224,7 @@ TEXTS = {
             "Или отсканируйте QR-код:\n"
             "После оплаты товар будет выслан автоматически."
         ),
-        'payment_timeout': 'Время оплаты истекло. Заказ отменен.',
+        'payment_timeout': 'Время оплата истекло. Заказ отменен.',
         'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
         'balance': 'Ваш баланс: {balance} лари',
         'balance_add': 'Введите сумму для пополнения баланса:',
@@ -608,7 +609,7 @@ async def show_main_menu(update, context, user_id, lang):
         return
     
     # Описание магазина
-    shop_description = "🏪 AutoShop - лучшие товары с доставкой по Грузии\n\n"
+    shop_description = "🏪 AutoShop - лучшие товары с доставка по Грузии\n\n"
     
     # Текст с информацией о пользователе
     user_info_text = get_text(
@@ -1059,6 +1060,7 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
         invoice_uuid = invoice['result']['uuid']
         payment_url = invoice['result']['link']
         qr_code = invoice['result'].get('qr_code', '')  # Получаем QR-код
+        address = invoice['result'].get('address', '')  # Получаем адрес кошелька
         
         expires_at = datetime.now() + timedelta(minutes=60)
         add_transaction(
@@ -1078,7 +1080,7 @@ async def handle_crypto_currency(update: Update, context: ContextTypes.DEFAULT_T
             'payment_instructions',
             amount=price,
             currency=crypto_currency,
-            payment_address=payment_url,
+            payment_address=address or payment_url,  # Используем адрес кошелька или ссылку
             qr_code=qr_code
         )
         

@@ -21,7 +21,7 @@ from db import (
     init_db, get_user, update_user, add_transaction, add_purchase, 
     get_pending_transactions, update_transaction_status, update_transaction_status_by_uuid, 
     get_last_order, is_banned, get_text, cities_cache, districts_cache, 
-    products_cache, delivery_types_cache
+    products_cache, delivery_types_cache, load_cache
 )
 from cryptocloud import create_cryptocloud_invoice, get_cryptocloud_invoice_status, check_payment_status_periodically, cancel_cryptocloud_invoice
 
@@ -284,8 +284,10 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         InlineKeyboardButton(text="🎁 Бонусы", callback_data="bonuses"),
         InlineKeyboardButton(text="📚 Правила", callback_data="rules")
     )
-    builder.row(InlineKeyboardButton(text="👨‍💻 Оператор", callback_data="operator"))
-    builder.row(InlineKeyboardButton(text="🔧 Техподдержка", callback_data="support"))
+    builder.row(
+        InlineKeyboardButton(text="👨‍💻 Оператор", callback_data="operator"),
+        InlineKeyboardButton(text="🔧 Техподдержка", callback_data="support")
+    )
     builder.row(InlineKeyboardButton(text="📢 Наш каannel", callback_data="channel"))
     builder.row(InlineKeyboardButton(text="⭐ Отзывы", callback_data="reviews"))
     builder.row(InlineKeyboardButton(text="🌐 Наш сайт", callback_data="website"))
@@ -793,6 +795,9 @@ async def main():
     # Инициализируем базу данных
     db_pool = await init_db(DATABASE_URL)
     
+    # Принудительно загружаем кэш после инициализации БД
+    await load_cache()
+    
     # Создаем aiohttp приложение для обработки postback-ов
     postback_app = web.Application()
     postback_app.router.add_post('/cryptocloud_postback', handle_cryptocloud_postback)
@@ -804,6 +809,9 @@ async def main():
     port = int(os.environ.get('POSTBACK_PORT', 5001))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
+    
+    # Добавляем небольшую задержку перед началом поллинга
+    await asyncio.sleep(2)
     
     # Запускаем бота
     await dp.start_polling(bot)

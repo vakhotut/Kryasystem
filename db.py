@@ -1,6 +1,9 @@
 import asyncpg
 from asyncpg.pool import Pool
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Глобальная переменная для пула соединений
 db_pool: Pool = None
@@ -12,9 +15,9 @@ ALLOWED_USER_COLUMNS = {
 }
 
 # Инициализация базы данных
-async def init_db():
+async def init_db(database_url):
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
+    db_pool = await asyncpg.create_pool(database_url, ssl='require')
     
     async with db_pool.acquire() as conn:
         # Таблица пользователей

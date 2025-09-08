@@ -2,6 +2,7 @@ import asyncpg
 from asyncpg.pool import Pool
 from datetime import datetime
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,14 @@ async def init_db(database_url):
         )
         ''')
         
+        # Новая таблица для типов доставки
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS delivery_types (
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL
+        )
+        ''')
+        
         # Новая таблица для товаров
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS products (
@@ -141,13 +150,36 @@ async def init_db(database_url):
         )
         ''')
         
-        # Новая таблица для типов доставки
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS delivery_types (
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
-        )
-        ''')
+        # Добавляем недостающие столбцы, если они еще не существуют
+        try:
+            await conn.execute("SELECT category_id FROM products LIMIT 1")
+        except Exception:
+            await conn.execute('ALTER TABLE products ADD COLUMN category_id INTEGER REFERENCES categories(id)')
+            logger.info("Added category_id column to products table")
+            
+        try:
+            await conn.execute("SELECT district_id FROM products LIMIT 1")
+        except Exception:
+            await conn.execute('ALTER TABLE products ADD COLUMN district_id INTEGER REFERENCES districts(id)')
+            logger.info("Added district_id column to products table")
+            
+        try:
+            await conn.execute("SELECT delivery_type_id FROM products LIMIT 1")
+        except Exception:
+            await conn.execute('ALTER TABLE products ADD COLUMN delivery_type_id INTEGER REFERENCES delivery_types(id)')
+            logger.info("Added delivery_type_id column to products table")
+            
+        try:
+            await conn.execute("SELECT uuid FROM products LIMIT 1")
+        except Exception:
+            await conn.execute('ALTER TABLE products ADD COLUMN uuid TEXT UNIQUE')
+            logger.info("Added uuid column to products table")
+            
+        try:
+            await conn.execute("SELECT description FROM products LIMIT 1")
+        except Exception:
+            await conn.execute('ALTER TABLE products ADD COLUMN description TEXT')
+            logger.info("Added description column to products table")
         
         # Заполняем таблицы начальными данными, если они пустые
         await init_default_data(conn)
@@ -290,37 +322,57 @@ async def init_default_data(conn):
                 ON CONFLICT (name) DO NOTHING
                 ''', category)
             
+            # Добавляем типы доставки
+            delivery_types = ['Подъезд', 'Прикоп', 'Магнит', 'Во дворах']
+            for delivery_type in delivery_types:
+                await conn.execute('''
+                INSERT INTO delivery_types (name) VALUES ($1)
+                ON CONFLICT (name) DO NOTHING
+                ''', delivery_type)
+            
             # Добавляем товары для каждого города
             if city == 'Тбилиси':
                 products = [
-                    ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 1, city_id, 1, 1),
-                    ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 1, city_id, 1, 1),
-                    ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 1, city_id, 1, 1),
-                    ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 2, city_id, 1, 1)
+                    ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
+                    ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
+                    ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
+                    ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 'Амфетамин', 'Центр', 'Подъезд')
                 ]
             else:
                 products = [
-                    ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 1, city_id, 1, 1),
-                    ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 1, city_id, 1, 1)
+                    ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
+                    ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд')
                 ]
                 
-            for product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id in products:
-                product_uuid = str(uuid.uuid4())
-                await conn.execute('''
-                INSERT INTO products (uuid, name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (uuid) DO NOTHING
-                ''', product_uuid, product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
-    
-    # Проверяем и добавляем типы доставки
-    delivery_count = await conn.fetchval('SELECT COUNT(*) FROM delivery_types')
-    if delivery_count == 0:
-        delivery_types = ['Подъезд', 'Прикоп', 'Магнит', 'Во дворах']
-        for delivery_type in delivery_types:
-            await conn.execute('''
-            INSERT INTO delivery_types (name) VALUES ($1)
-            ON CONFLICT (name) DO NOTHING
-            ''', delivery_type)
+            # Получаем ID категорий, районов и типов доставки
+            categories_dict = {}
+            categories_rows = await conn.fetch('SELECT * FROM categories')
+            for row in categories_rows:
+                categories_dict[row['name']] = row['id']
+                
+            districts_dict = {}
+            districts_rows = await conn.fetch('SELECT * FROM districts WHERE city_id = $1', city_id)
+            for row in districts_rows:
+                districts_dict[row['name']] = row['id']
+                
+            delivery_types_dict = {}
+            delivery_types_rows = await conn.fetch('SELECT * FROM delivery_types')
+            for row in delivery_types_rows:
+                delivery_types_dict[row['name']] = row['id']
+                
+            # Добавляем товары
+            for product_name, description, price, image_url, category_name, district_name, delivery_type_name in products:
+                category_id = categories_dict.get(category_name)
+                district_id = districts_dict.get(district_name)
+                delivery_type_id = delivery_types_dict.get(delivery_type_name)
+                
+                if category_id and district_id and delivery_type_id:
+                    product_uuid = str(uuid.uuid4())
+                    await conn.execute('''
+                    INSERT INTO products (uuid, name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (uuid) DO NOTHING
+                    ''', product_uuid, product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
 
 # Функция для загрузки данных в кэш
 async def load_cache():

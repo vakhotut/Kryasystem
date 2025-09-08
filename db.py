@@ -427,3 +427,19 @@ async def is_banned(user_id):
         except ValueError:
             return False
     return False
+
+# Функции-геттеры для доступа к актуальным кэшам
+def get_cities_cache():
+    return cities_cache
+
+def get_districts_cache():
+    return districts_cache
+
+def get_products_cache():
+    return products_cache
+
+def get_delivery_types_cache():
+    return delivery_types_cache
+
+def get_texts_cache():
+    return texts_cache

@@ -810,7 +810,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     
-    # Добавляем небольшую задержку перед началом поллинга
+    # Добавляем задержку для избежания конфликта поллинга
     await asyncio.sleep(2)
     
     # Запускаем бота

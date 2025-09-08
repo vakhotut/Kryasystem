@@ -312,7 +312,8 @@ async def load_cache():
             texts_cache[lang] = {row['key']: row['value'] for row in rows}
         
         # Загрузка городов
-        cities_cache = await conn.fetch('SELECT * FROM cities ORDER BY name')
+        cities_rows = await conn.fetch('SELECT * FROM cities ORDER BY name')
+        cities_cache = [dict(row) for row in cities_rows]
         
         # Загрузка районов
         districts_cache = {}
@@ -323,8 +324,18 @@ async def load_cache():
         # Загрузка товаров
         products_cache = {}
         for city in cities_cache:
-            products = await conn.fetch('SELECT * FROM products WHERE city_id = $1 ORDER BY name', city['id'])
-            products_cache[city['name']] = {product['name']: {'price': product['price'], 'image': product['image_url']} for product in products}
+            products = await conn.fetch('''
+                SELECT p.name, p.price, p.image_url 
+                FROM products p 
+                WHERE p.city_id = $1 
+                ORDER BY p.name
+            ''', city['id'])
+            products_cache[city['name']] = {
+                product['name']: {
+                    'price': product['price'], 
+                    'image': product['image_url']
+                } for product in products
+            }
         
         # Загрузка типов доставки
         delivery_types = await conn.fetch('SELECT * FROM delivery_types ORDER BY name')

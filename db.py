@@ -20,6 +20,7 @@ cities_cache = []
 districts_cache = {}
 products_cache = {}
 delivery_types_cache = []
+categories_cache = []
 
 # Инициализация базы данных
 async def init_db(database_url):
@@ -113,15 +114,30 @@ async def init_db(database_url):
         )
         ''')
         
+        # Новая таблица для категорий товаров
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS categories (
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
         # Новая таблица для товаров
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
-            city_id INTEGER REFERENCES cities(id) ON DELETE CASCADE,
+            uuid TEXT UNIQUE NOT NULL,
             name TEXT NOT NULL,
+            description TEXT,
             price REAL NOT NULL,
             image_url TEXT,
-            UNIQUE(city_id, name)
+            category_id INTEGER REFERENCES categories(id),
+            city_id INTEGER REFERENCES cities(id),
+            district_id INTEGER REFERENCES districts(id),
+            delivery_type_id INTEGER REFERENCES delivery_types(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
         
@@ -266,26 +282,35 @@ async def init_default_data(conn):
                 ON CONFLICT (city_id, name) DO NOTHING
                 ''', city_id, district)
             
+            # Добавляем категории товаров
+            categories = ['Мефедрон', 'Амфетамин', 'Кокаин', 'Гашиш']
+            for category in categories:
+                await conn.execute('''
+                INSERT INTO categories (name) VALUES ($1)
+                ON CONFLICT (name) DO NOTHING
+                ''', category)
+            
             # Добавляем товары для каждого города
             if city == 'Тбилиси':
                 products = [
-                    ('0.5 меф', 35, 'https://example.com/image1.jpg'),
-                    ('1.0 меф', 70, 'https://example.com/image2.jpg'),
-                    ('0.5 меф золотой', 50, 'https://example.com/image3.jpg'),
-                    ('0.3 красный', 35, 'https://example.com/image4.jpg')
+                    ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 1, city_id, 1, 1),
+                    ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 1, city_id, 1, 1),
+                    ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 1, city_id, 1, 1),
+                    ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 2, city_id, 1, 1)
                 ]
             else:
                 products = [
-                    ('0.5 меф', 35, 'https://example.com/image1.jpg'),
-                    ('1.0 меф', 70, 'https://example.com/image2.jpg')
+                    ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 1, city_id, 1, 1),
+                    ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 1, city_id, 1, 1)
                 ]
                 
-            for product_name, price, image_url in products:
+            for product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id in products:
+                product_uuid = str(uuid.uuid4())
                 await conn.execute('''
-                INSERT INTO products (city_id, name, price, image_url)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (city_id, name) DO NOTHING
-                ''', city_id, product_name, price, image_url)
+                INSERT INTO products (uuid, name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (uuid) DO NOTHING
+                ''', product_uuid, product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
     
     # Проверяем и добавляем типы доставки
     delivery_count = await conn.fetchval('SELECT COUNT(*) FROM delivery_types')
@@ -299,7 +324,7 @@ async def init_default_data(conn):
 
 # Функция для загрузки данных в кэш
 async def load_cache():
-    global texts_cache, cities_cache, districts_cache, products_cache, delivery_types_cache
+    global texts_cache, cities_cache, districts_cache, products_cache, delivery_types_cache, categories_cache
     
     try:
         async with db_pool.acquire() as conn:
@@ -319,19 +344,26 @@ async def load_cache():
                 districts = await conn.fetch('SELECT * FROM districts WHERE city_id = $1 ORDER BY name', city['id'])
                 districts_cache[city['name']] = [district['name'] for district in districts]
             
+            # Загрузка категорий
+            categories_rows = await conn.fetch('SELECT * FROM categories ORDER BY name')
+            categories_cache = [dict(row) for row in categories_rows]
+            
             # Загрузка товаров
             products_cache = {}
             for city in cities_cache:
                 products = await conn.fetch('''
-                    SELECT p.name, p.price, p.image_url 
+                    SELECT p.name, p.description, p.price, p.image_url, c.name as category_name
                     FROM products p 
+                    LEFT JOIN categories c ON p.category_id = c.id
                     WHERE p.city_id = $1 
                     ORDER BY p.name
                 ''', city['id'])
                 products_cache[city['name']] = {
                     product['name']: {
+                        'description': product['description'],
                         'price': product['price'], 
-                        'image': product['image_url']
+                        'image': product['image_url'],
+                        'category': product['category_name']
                     } for product in products
                 }
             
@@ -440,6 +472,9 @@ def get_products_cache():
 
 def get_delivery_types_cache():
     return delivery_types_cache
+
+def get_categories_cache():
+    return categories_cache
 
 def get_texts_cache():
     return texts_cache

@@ -76,6 +76,7 @@ async def init_db(database_url):
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
         ''')
+    return db_pool
 
 # Функции для работы с базой данных
 async def get_user(user_id):

@@ -136,9 +136,6 @@ async def init_db(database_url):
         # Заполняем таблицы начальными данными, если они пустые
         await init_default_data(conn)
         
-        # Загружаем данные в кэш
-        await load_cache()
-        
     return db_pool
 
 # Функция для заполнения начальных данных
@@ -304,42 +301,48 @@ async def init_default_data(conn):
 async def load_cache():
     global texts_cache, cities_cache, districts_cache, products_cache, delivery_types_cache
     
-    async with db_pool.acquire() as conn:
-        # Загрузка текстов
-        texts_cache = {}
-        for lang in ['ru', 'en', 'ka']:
-            rows = await conn.fetch('SELECT key, value FROM texts WHERE lang = $1', lang)
-            texts_cache[lang] = {row['key']: row['value'] for row in rows}
-        
-        # Загрузка городов
-        cities_rows = await conn.fetch('SELECT * FROM cities ORDER BY name')
-        cities_cache = [dict(row) for row in cities_rows]
-        
-        # Загрузка районов
-        districts_cache = {}
-        for city in cities_cache:
-            districts = await conn.fetch('SELECT * FROM districts WHERE city_id = $1 ORDER BY name', city['id'])
-            districts_cache[city['name']] = [district['name'] for district in districts]
-        
-        # Загрузка товаров
-        products_cache = {}
-        for city in cities_cache:
-            products = await conn.fetch('''
-                SELECT p.name, p.price, p.image_url 
-                FROM products p 
-                WHERE p.city_id = $1 
-                ORDER BY p.name
-            ''', city['id'])
-            products_cache[city['name']] = {
-                product['name']: {
-                    'price': product['price'], 
-                    'image': product['image_url']
-                } for product in products
-            }
-        
-        # Загрузка типов доставки
-        delivery_types = await conn.fetch('SELECT * FROM delivery_types ORDER BY name')
-        delivery_types_cache = [delivery_type['name'] for delivery_type in delivery_types]
+    try:
+        async with db_pool.acquire() as conn:
+            # Загрузка текстов
+            texts_cache = {}
+            for lang in ['ru', 'en', 'ka']:
+                rows = await conn.fetch('SELECT key, value FROM texts WHERE lang = $1', lang)
+                texts_cache[lang] = {row['key']: row['value'] for row in rows}
+            
+            # Загрузка городов
+            cities_rows = await conn.fetch('SELECT * FROM cities ORDER BY name')
+            cities_cache = [dict(row) for row in cities_rows]
+            
+            # Загрузка районов
+            districts_cache = {}
+            for city in cities_cache:
+                districts = await conn.fetch('SELECT * FROM districts WHERE city_id = $1 ORDER BY name', city['id'])
+                districts_cache[city['name']] = [district['name'] for district in districts]
+            
+            # Загрузка товаров
+            products_cache = {}
+            for city in cities_cache:
+                products = await conn.fetch('''
+                    SELECT p.name, p.price, p.image_url 
+                    FROM products p 
+                    WHERE p.city_id = $1 
+                    ORDER BY p.name
+                ''', city['id'])
+                products_cache[city['name']] = {
+                    product['name']: {
+                        'price': product['price'], 
+                        'image': product['image_url']
+                    } for product in products
+                }
+            
+            # Загрузка типов доставки
+            delivery_types = await conn.fetch('SELECT * FROM delivery_types ORDER BY name')
+            delivery_types_cache = [delivery_type['name'] for delivery_type in delivery_types]
+            
+        logger.info("Кэш успешно загружен")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки кэша: {e}")
+        raise
 
 # Функция для получения текста
 def get_text(lang, key, **kwargs):

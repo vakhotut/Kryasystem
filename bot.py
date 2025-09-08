@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY", "YOUR_CRYPTOCLOUD_API_KEY")
 CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID", "YOUR_CRYPTOCLOUD_SHOP_ID")
-DATABASE_URL = os.environ['DATABASE_URL']
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://user:pass@localhost/dbname')
 POSTBACK_SECRET = os.getenv("POSTBACK_SECRET", CRYPTOCLOUD_API_KEY)  # Секрет для проверки подписи
 
 # Состояния разговора
@@ -94,7 +94,7 @@ async def check_pending_transactions_loop():
                         
                         # Получаем информацию о продукте для изображения
                         product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
-                        city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' in ' in product_info else 'Тбилиси'
+                        city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
                         
                         product_image = PRODUCTS.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
                         
@@ -999,7 +999,7 @@ def main():
     # Инициализируем базу данных синхронно
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(init_db())
+    loop.run_until_complete(init_db(DATABASE_URL))
     
     # Создаем обработчики
     conv_handler = ConversationHandler(

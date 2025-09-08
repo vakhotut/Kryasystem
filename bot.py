@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardButton, InputMediaPhoto
+from aiogram.types import InlineKeyboardButton
 import aiohttp
 from aiohttp import web
 import asyncpg
@@ -31,10 +31,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Настройки бота
-TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY", "YOUR_CRYPTOCLOUD_API_KEY")
-CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID", "YOUR_CRYPTOCLOUD_SHOP_ID")
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://user:pass@localhost/dbname')
+TOKEN = os.getenv("BOT_TOKEN")
+CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY")
+CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID")
+DATABASE_URL = os.environ.get('DATABASE_URL')
 POSTBACK_SECRET = os.getenv("POSTBACK_SECRET", CRYPTOCLOUD_API_KEY)
 
 # Состояния разговора
@@ -79,7 +79,7 @@ async def check_pending_transactions_loop():
             transactions = await get_pending_transactions()
             for transaction in transactions:
                 invoice_uuid = transaction['invoice_uuid']
-                status_info = get_cryptocloud_invoice_status(invoice_uuid)
+                status_info = await get_cryptocloud_invoice_status(invoice_uuid)
                 
                 if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
                     invoice = status_info['result'][0]
@@ -297,13 +297,13 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
     if 'last_message_id' in data:
         await delete_previous_message(user_id, data['last_message_id'])
     
-    message = await message.answer_photo(
+    sent_message = await message.answer_photo(
         photo=image_url,
         caption=full_text,
         reply_markup=builder.as_markup()
     )
     
-    await state.update_data(last_message_id=message.message_id)
+    await state.update_data(last_message_id=sent_message.message_id)
 
 @dp.callback_query(Form.main_menu)
 async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
@@ -327,17 +327,17 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             builder.row(InlineKeyboardButton(text=cat, callback_data=f"cat_{cat}"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
         
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'select_category'),
             reply_markup=builder.as_markup()
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.category)
     elif data == 'balance':
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'balance_add')
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.balance)
     elif data == 'last_order':
         last_order = await get_last_order(user_id)
@@ -350,49 +350,49 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
                 f"🕐 Время заказа: {last_order['purchase_time']}\n"
                 f"📊 Статус: {last_order['status']}"
             )
-            message = await callback.message.answer(
+            sent_message = await callback.message.answer(
                 text=order_text
             )
         else:
-            message = await callback.message.answer(
+            sent_message = await callback.message.answer(
                 text=get_text(lang, 'no_orders')
             )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
     elif data == 'bonuses':
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'bonuses')
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
     elif data == 'rules':
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'rules')
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
     elif data == 'operator' or data == 'support':
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'support')
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
     elif data == 'channel':
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text="https://t.me/your_channel"
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
     elif data == 'reviews':
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'reviews')
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
     elif data == 'website':
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text="https://yourwebsite.com"
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
     elif data == 'personal_bot':
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text="https://t.me/your_bot"
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
     elif data == 'back_to_main':
         await show_main_menu(callback.message, state, user_id, lang)
         await state.set_state(Form.main_menu)
@@ -420,10 +420,10 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     city = city_data.get('city')
     
     if city not in PRODUCTS or category not in PRODUCTS[city]:
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'error')
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         return
     
     await state.update_data(category=category)
@@ -435,11 +435,11 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
         builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
     builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_category"))
     
-    message = await callback.message.answer(
+    sent_message = await callback.message.answer(
         text=get_text(lang, 'select_district'),
         reply_markup=builder.as_markup()
     )
-    await state.update_data(last_message_id=message.message_id)
+    await state.update_data(last_message_id=sent_message.message_id)
     await state.set_state(Form.district)
 
 @dp.callback_query(Form.district)
@@ -464,11 +464,11 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             builder.row(InlineKeyboardButton(text=cat, callback_data=f"cat_{cat}"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
         
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'select_category'),
             reply_markup=builder.as_markup()
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.category)
         return
     
@@ -477,10 +477,10 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
     city = city_data.get('city')
     
     if city not in DISTRICTS or district not in DISTRICTS[city]:
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'error')
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         return
     
     await state.update_data(district=district)
@@ -490,11 +490,11 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
         builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
     builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
     
-    message = await callback.message.answer(
+    sent_message = await callback.message.answer(
         text=get_text(lang, 'select_delivery'),
         reply_markup=builder.as_markup()
     )
-    await state.update_data(last_message_id=message.message_id)
+    await state.update_data(last_message_id=sent_message.message_id)
     await state.set_state(Form.delivery)
 
 @dp.callback_query(Form.delivery)
@@ -520,21 +520,21 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
             builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_category"))
         
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'select_district'),
             reply_markup=builder.as_markup()
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.district)
         return
     
     delivery_type = data.replace('del_', '')
     
     if delivery_type not in DELIVERY_TYPES:
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'error')
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         return
     
     await state.update_data(delivery_type=delivery_type)
@@ -559,11 +559,11 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
     builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
     builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_delivery"))
     
-    message = await callback.message.answer(
+    sent_message = await callback.message.answer(
         text=order_text,
         reply_markup=builder.as_markup()
     )
-    await state.update_data(last_message_id=message.message_id)
+    await state.update_data(last_message_id=sent_message.message_id)
     await state.set_state(Form.confirmation)
 
 @dp.callback_query(Form.confirmation)
@@ -585,11 +585,11 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
         
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'select_delivery'),
             reply_markup=builder.as_markup()
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.delivery)
         return
     
@@ -601,11 +601,11 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
         builder.row(InlineKeyboardButton(text="LTC", callback_data="crypto_LTC"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_confirmation"))
         
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=get_text(lang, 'select_crypto'),
             reply_markup=builder.as_markup()
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.crypto_currency)
     else:
         await show_main_menu(callback.message, state, user_id, lang)
@@ -646,11 +646,11 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_delivery"))
         
-        message = await callback.message.answer(
+        sent_message = await callback.message.answer(
             text=order_text,
             reply_markup=builder.as_markup()
         )
-        await state.update_data(last_message_id=message.message_id)
+        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.confirmation)
         return
     
@@ -670,7 +670,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
     order_id = f"order_{int(time.time())}_{user_id}"
     price_usd = price
     
-    invoice_resp = create_cryptocloud_invoice(price_usd, crypto_currency, order_id)
+    invoice_resp = await create_cryptocloud_invoice(price_usd, crypto_currency, order_id)
 
     if not invoice_resp:
         logger.error("create_cryptocloud_invoice returned None")
@@ -688,7 +688,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
 
     address = invoice_data.get('address') or ''
     if not address and invoice_uuid:
-        info = get_cryptocloud_invoice_status(invoice_uuid)
+        info = await get_cryptocloud_invoice_status(invoice_uuid)
         if info and info.get('status') == 'success' and len(info.get('result', [])) > 0:
             address = info['result'][0].get('address', '') or ''
 

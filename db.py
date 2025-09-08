@@ -188,7 +188,7 @@ async def init_db(database_url):
 
 # Функция для заполнения начальных данных
 async def init_default_data(conn):
-    # Проверяем, есть ли уже данные в таблицах
+    # Проверяем, есть ли уже данные в таблицам
     texts_count = await conn.fetchval('SELECT COUNT(*) FROM texts')
     if texts_count == 0:
         # Добавляем тексты

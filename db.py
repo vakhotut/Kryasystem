@@ -513,7 +513,7 @@ async def is_banned(user_id):
     return False
 
 # Функции-геттеры для доступа к актуальным кэшам
-def get_c cities_cache():
+def get_cities_cache():
     return cities_cache
 
 def get_districts_cache():

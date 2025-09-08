@@ -785,6 +785,9 @@ async def on_startup(app):
 async def main():
     global db_pool
     
+    # Удаляем вебхук перед запуском поллинга
+    await bot.delete_webhook(drop_pending_updates=True)
+    
     # Инициализируем базу данных
     db_pool = await init_db(DATABASE_URL)
     

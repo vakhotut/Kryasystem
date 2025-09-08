@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 # Глобальная переменная для пула соединений
 db_pool: Pool = None
 
-# Белый список разрешенных колонок для обновления
+# Белый список разрешенных колонки для обновления
 ALLOWED_USER_COLUMNS = {
     'username', 'first_name', 'language', 'captcha_passed',
     'ban_until', 'failed_payments', 'purchase_count', 'discount', 'balance'
@@ -71,7 +71,7 @@ async def init_db(database_url):
             await conn.execute('ALTER TABLE transactions ADD COLUMN invoice_uuid TEXT')
             logger.info("Added invoice_uuid column to transactions table")
         
-        # Таблица покупок
+        # Таблица покупки
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS purchases (
             id SERIAL PRIMARY KEY,
@@ -188,7 +188,7 @@ async def init_db(database_url):
 
 # Функция для заполнения начальных данных
 async def init_default_data(conn):
-    # Проверяем, есть ли уже данные в таблицам
+    # Проверяем, есть ли уже данные в таблицах
     texts_count = await conn.fetchval('SELECT COUNT(*) FROM texts')
     if texts_count == 0:
         # Добавляем тексты
@@ -513,7 +513,7 @@ async def is_banned(user_id):
     return False
 
 # Функции-геттеры для доступа к актуальным кэшам
-def get_cities_cache():
+def get_c cities_cache():
     return cities_cache
 
 def get_districts_cache():

@@ -1,6 +1,6 @@
-import requests
+import aiohttp
+import asyncio
 import os
-import time
 from datetime import datetime, timedelta
 import logging
 
@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY")
 CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID")
 
-def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=None, shop_id=None, poll_attempts=30, poll_interval=1):
+async def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=None, shop_id=None, poll_attempts=30, poll_interval=1):
     """
     Создание инвойса в CryptoCloud с попыткой получить address.
     :param amount: Сумма в USD
@@ -52,48 +52,47 @@ def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=None, sh
         payload["email"] = email
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        response.raise_for_status()
-        result = response.json()
-        logger.info(f"CryptoCloud invoice CREATE response: {result}")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=15) as response:
+                response.raise_for_status()
+                result = await response.json()
+                logger.info(f"CryptoCloud invoice CREATE response: {result}")
 
-        if not result or result.get('status') != 'success':
-            logger.error(f"CryptoCloud returned error on create: {result}")
-            return result
+                if not result or result.get('status') != 'success':
+                    logger.error(f"CryptoCloud returned error on create: {result}")
+                    return result
 
-        # Если address уже есть — возвращаем ответ
-        res_obj = result.get('result', {})
-        address = res_obj.get('address')
-        if address:
-            return result
+                # Если address уже есть — возвращаем ответ
+                res_obj = result.get('result', {})
+                address = res_obj.get('address')
+                if address:
+                    return result
 
-        # если address пустой — пробуем опрашивать merchant/info (иногда генерируется чуть позже)
-        uuid = res_obj.get('uuid')
-        if not uuid:
-            return result
+                # если address пустой — пробуем опрашивать merchant/info (иногда генерируется чуть позже)
+                uuid = res_obj.get('uuid')
+                if not uuid:
+                    return result
 
-        for attempt in range(poll_attempts):
-            time.sleep(poll_interval)
-            info = get_cryptocloud_invoice_status(uuid)
-            logger.info(f"Polling invoice info (attempt {attempt+1}): {info}")
-            if info and info.get('status') == 'success' and len(info.get('result', [])) > 0:
-                inv = info['result'][0]
-                if inv.get('address'):
-                    # возвращаем структуру похожую на create response, с адресом
-                    return {
-                        "status": "success",
-                        "result": inv
-                    }
-        # по завершении попыток — возвращаем первоначальный результат (без address)
-        return result
+                for attempt in range(poll_attempts):
+                    await asyncio.sleep(poll_interval)
+                    info = await get_cryptocloud_invoice_status(uuid)
+                    logger.info(f"Polling invoice info (attempt {attempt+1}): {info}")
+                    if info and info.get('status') == 'success' and len(info.get('result', [])) > 0:
+                        inv = info['result'][0]
+                        if inv.get('address'):
+                            # возвращаем структуру похожую на create response, с адресом
+                            return {
+                                "status": "success",
+                                "result": inv
+                            }
+                # по завершении попыток — возвращаем первоначальный результат (без address)
+                return result
 
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         logger.error(f"Error creating CryptoCloud invoice: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"Response content: {e.response.text}")
         return None
 
-def get_cryptocloud_invoice_status(uuids):
+async def get_cryptocloud_invoice_status(uuids):
     """
     Получение статуса инвойса/инвойсов в CryptoCloud
 
@@ -115,16 +114,15 @@ def get_cryptocloud_invoice_status(uuids):
     }
     
     try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=data) as response:
+                response.raise_for_status()
+                return await response.json()
+    except Exception as e:
         logger.error(f"Error getting CryptoCloud invoice status: {e}")
-        if hasattr(e, 'response') and e.response:
-            logger.error(f"Response content: {e.response.text}")
         return None
 
-def cancel_cryptocloud_invoice(invoice_uuid):
+async def cancel_cryptocloud_invoice(invoice_uuid):
     """
     Отмена инвойса в CryptoCloud
     
@@ -143,16 +141,15 @@ def cancel_cryptocloud_invoice(invoice_uuid):
     }
     
     try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=data) as response:
+                response.raise_for_status()
+                return await response.json()
+    except Exception as e:
         logger.error(f"Error canceling CryptoCloud invoice: {e}")
-        if hasattr(e, 'response') and e.response:
-            logger.error(f"Response content: {e.response.text}")
         return None
 
-def check_payment_status_periodically(invoice_uuid, max_checks=60, interval=60):
+async def check_payment_status_periodically(invoice_uuid, max_checks=60, interval=60):
     """
     Периодическая проверка статуса платежа
     
@@ -162,7 +159,7 @@ def check_payment_status_periodically(invoice_uuid, max_checks=60, interval=60):
     :return: Статус платежа
     """
     for _ in range(max_checks):
-        status_info = get_cryptocloud_invoice_status(invoice_uuid)
+        status_info = await get_cryptocloud_invoice_status(invoice_uuid)
         
         if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
             invoice = status_info['result'][0]  # Берем первый счет из массива
@@ -172,6 +169,6 @@ def check_payment_status_periodically(invoice_uuid, max_checks=60, interval=60):
             elif invoice_status in ['expired', 'canceled']:
                 return invoice_status
         
-        time.sleep(interval)
+        await asyncio.sleep(interval)
     
     return 'timeout'

@@ -20,8 +20,9 @@ import asyncpg
 from db import (
     init_db, get_user, update_user, add_transaction, add_purchase, 
     get_pending_transactions, update_transaction_status, update_transaction_status_by_uuid, 
-    get_last_order, is_banned, get_text, cities_cache, districts_cache, 
-    products_cache, delivery_types_cache, load_cache
+    get_last_order, is_banned, get_text, 
+    load_cache,
+    get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache
 )
 from cryptocloud import create_cryptocloud_invoice, get_cryptocloud_invoice_status, check_payment_status_periodically, cancel_cryptocloud_invoice
 
@@ -95,6 +96,7 @@ async def check_pending_transactions_loop():
                         product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
                         city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
                         
+                        products_cache = get_products_cache()
                         product_image = products_cache.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
                         
                         await bot.send_message(
@@ -175,6 +177,7 @@ async def process_successful_payment(order_id):
             user = await get_user(user_id)
             lang = user['language'] or 'ru' if user else 'ru'
             
+            products_cache = get_products_cache()
             product_image = products_cache.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
             
             await bot.send_message(
@@ -260,6 +263,9 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
     if not user:
         return
     
+    # Получаем актуальные кэши
+    cities_cache = get_cities_cache()
+    
     shop_description = "🏪 AutoShop - лучшие товары с доставка по Грузии\n\n"
     user_info_text = get_text(
         lang, 
@@ -323,6 +329,9 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
     if data.startswith('city_'):
         city = data.replace('city_', '')
         await state.update_data(city=city)
+        
+        # Получаем актуальные кэши
+        products_cache = get_products_cache()
         
         builder = InlineKeyboardBuilder()
         if city in products_cache:
@@ -422,6 +431,9 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     city_data = await state.get_data()
     city = city_data.get('city')
     
+    # Получаем актуальные кэши
+    products_cache = get_products_cache()
+    
     if city not in products_cache or category not in products_cache[city]:
         sent_message = await callback.message.answer(
             text=get_text(lang, 'error')
@@ -432,7 +444,10 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(category=category)
     await state.update_data(price=products_cache[city][category]['price'])
     
+    # Получаем актуальные кэши
+    districts_cache = get_districts_cache()
     districts = districts_cache.get(city, [])
+    
     builder = InlineKeyboardBuilder()
     for district in districts:
         builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
@@ -462,6 +477,9 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
         city_data = await state.get_data()
         city = city_data.get('city')
         
+        # Получаем актуальные кэши
+        products_cache = get_products_cache()
+        
         builder = InlineKeyboardBuilder()
         if city in products_cache:
             for cat in products_cache[city].keys():
@@ -480,6 +498,9 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
     city_data = await state.get_data()
     city = city_data.get('city')
     
+    # Получаем актуальные кэши
+    districts_cache = get_districts_cache()
+    
     if city not in districts_cache or district not in districts_cache[city]:
         sent_message = await callback.message.answer(
             text=get_text(lang, 'error')
@@ -488,6 +509,9 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
         return
     
     await state.update_data(district=district)
+    
+    # Получаем актуальные кэши
+    delivery_types_cache = get_delivery_types_cache()
     
     builder = InlineKeyboardBuilder()
     for del_type in delivery_types_cache:
@@ -517,6 +541,9 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
     if data == 'back_to_district':
         city_data = await state.get_data()
         city = city_data.get('city')
+        
+        # Получаем актуальные кэши
+        districts_cache = get_districts_cache()
         districts = districts_cache.get(city, [])
         
         builder = InlineKeyboardBuilder()
@@ -533,6 +560,9 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         return
     
     delivery_type = data.replace('del_', '')
+    
+    # Получаем актуальные кэши
+    delivery_types_cache = get_delivery_types_cache()
     
     if delivery_type not in delivery_types_cache:
         sent_message = await callback.message.answer(
@@ -584,6 +614,9 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
         await delete_previous_message(user_id, state_data['last_message_id'])
     
     if data == 'back_to_delivery':
+        # Получаем актуальные кэши
+        delivery_types_cache = get_delivery_types_cache()
+        
         builder = InlineKeyboardBuilder()
         for del_type in delivery_types_cache:
             builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))

@@ -5,6 +5,7 @@ import asyncio
 import os
 import hmac
 import hashlib
+import jwt
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -117,13 +118,14 @@ async def check_pending_transactions_loop():
 # Обработчик POSTBACK уведомлений от CryptoCloud
 async def handle_cryptocloud_postback(request):
     try:
-        # Получаем данные из POST запроса
         data = await request.post()
+        data_dict = dict(data)
         
-        # Проверяем подпись (если предоставлена)
-        if 'signature' in data:
-            signature = data['signature']
-            verify_data = data.copy()
+        # Проверяем наличие сигнатуры или токена
+        if 'signature' in data_dict:
+            # Проверка HMAC подписи
+            signature = data_dict['signature']
+            verify_data = data_dict.copy()
             del verify_data['signature']
             
             sorted_data = sorted(verify_data.items())
@@ -133,16 +135,23 @@ async def handle_cryptocloud_postback(request):
             if not hmac.compare_digest(signature, expected_signature):
                 logger.warning("Invalid signature in CryptoCloud postback")
                 return web.json_response({'status': 'error', 'message': 'Invalid signature'}, status=403)
-        
-        logger.info(f"Received CryptoCloud postback: {dict(data)}")
-        
-        status = data.get('status')
-        order_id = data.get('order_id')
-        token = data.get('token')
-        
-        if 'signature' not in data and token != POSTBACK_SECRET:
-            logger.warning("Invalid token in CryptoCloud postback")
-            return web.json_response({'status': 'error', 'message': 'Invalid token'}, status=403)
+        else:
+            # Проверка JWT токена
+            token = data_dict.get('token')
+            if not token:
+                logger.warning("No token in CryptoCloud postback")
+                return web.json_response({'status': 'error', 'message': 'No token'}, status=403)
+            
+            try:
+                # Декодируем JWT с использованием API ключа как секрета
+                decoded = jwt.decode(token, CRYPTOCLOUD_API_KEY, algorithms=['HS256'])
+            except jwt.InvalidTokenError:
+                logger.warning("Invalid token in CryptoCloud postback")
+                return web.json_response({'status': 'error', 'message': 'Invalid token'}, status=403)
+
+        # Обработка успешного платежа
+        status = data_dict.get('status')
+        order_id = data_dict.get('order_id')
         
         if status == 'success' and order_id:
             asyncio.create_task(process_successful_payment(order_id))
@@ -814,7 +823,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
     order_id = f"order_{int(time.time())}_{user_id}"
     price_usd = price
     
-    invoice_resp = await create_cryptocloud_invoice(price_usd, crypto_currency, order_id)
+    invoice_resp = await create_cryptocloud_invoice(price_usd, crypto_currency, order_id, test_mode=False)
 
     if not invoice_resp:
         logger.error("create_cryptocloud_invoice returned None")
@@ -894,7 +903,7 @@ async def process_balance(message: types.Message, state: FSMContext):
         # Создаем инвойс для пополнения баланса
         order_id = f"topup_{int(time.time())}_{user.id}"
         
-        invoice_resp = await create_cryptocloud_invoice(amount, currency, order_id)
+        invoice_resp = await create_cryptocloud_invoice(amount, currency, order_id, test_mode=False)
         
         if not invoice_resp or invoice_resp.get('status') != 'success' or not invoice_resp.get('result'):
             await message.answer(get_text(lang, 'error'))

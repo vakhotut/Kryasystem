@@ -86,7 +86,7 @@ async def init_db(database_url):
         )
         ''')
         
-        # Новая таблица для текстов
+        # Новая таблида для текстов
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS texts (
             id SERIAL PRIMARY KEY,

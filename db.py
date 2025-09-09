@@ -97,7 +97,7 @@ async def init_db(database_url):
         )
         ''')
         
-        # Новая таблиция для городов
+        # Новая таблица для городов
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS cities (
             id SERIAL PRIMARY KEY,
@@ -188,161 +188,158 @@ async def init_db(database_url):
 
 # Функция для заполнения начальных данных
 async def init_default_data(conn):
-    # Проверяем, есть ли уже данные в таблицах
-    texts_count = await conn.fetchval('SELECT COUNT(*) FROM texts')
-    if texts_count == 0:
-        # Добавляем тексты
-        default_texts = {
-            'ru': {
-                'welcome': 'Добро пожаловать!',
-                'captcha': 'Для входа решите каптчу: {code}\nВведите 5 цифр:',
-                'captcha_failed': 'Неверная каптча! Попробуйте снова:',
-                'language_selected': 'Язык установлен: Русский',
-                'main_menu': "👤 Имя: {name}\n📛 Юзернейм: @{username}\n🛒 Покупок: {purchases}\n🎯 Скидка: {discount}%\n💰 Баланс: {balance}$",
-                'select_city': 'Выберите город:',
-                'select_category': 'Выберите категорию:',
-                'select_district': 'Выберите район:',
-                'select_delivery': 'Выберите тип доставки:',
-                'order_summary': "Информация о заказе:\n📦 Товар: {product}\n💵 Стоимость: {price}$\n🏙 Район: {district}\n🚚 Тип доставки: {delivery_type}\n\nВсё верно?",
-                'select_crypto': 'Выберите криптовалюту для оплаты:',
-                'payment_instructions': "Оплатите {amount} {currency} по адресу:\n`{payment_address}`\n\nОтсканируйте QR-код для оплаты:\nПосле оплаты товар будет выслан автоматически.",
-                'payment_timeout': 'Время оплата истекло. Заказ отменен.',
-                'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
-                'balance': 'Ваш баланс: {balance}$',
-                'balance_add': 'Введите сумму для пополнения баланса в $:',
-                'balance_add_success': 'Баланс пополнен на {amount}$. Текущий баланс: {balance}$',
-                'support': 'По всем вопросам обращайтесь к @support_username',
-                'bonuses': 'Бонусная система:\n- За каждую 5-ю покупку скидка 10%\n- Пригласи друга и получи 50$ на баланс',
-                'rules': 'Правила:\n1. Не сообщайте никому данные о заказе\n2. Оплата только в течение 60 минут\n3. При нарушении правил - бан',
-                'reviews': 'Наши отзывы: @reviews_channel',
-                'error': 'Произошла ошибка. Попробуйте позже.',
-                'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.',
-                'back': '⬅️ Назад',
-                'main_menu_button': '🏠 Главное меню',
-                'last_order': 'Информация о последнем заказе',
-                'no_orders': 'У вас еще не было заказов',
-                'main_menu_description': '''Добро пожаловать в магазин!
+    # Всегда обновляем тексты, даже если они уже существуют
+    default_texts = {
+        'ru': {
+            'welcome': 'Добро пожаловать!',
+            'captcha': 'Для входа решите каптчу: {code}\nВведите 5 цифр:',
+            'captcha_failed': 'Неверная каптча! Попробуйте снова:',
+            'language_selected': 'Язык установлен: Русский',
+            'main_menu': "👤 Имя: {name}\n📛 Юзернейм: @{username}\n🛒 Покупок: {purchases}\n🎯 Скидка: {discount}%\n💰 Баланс: {balance}$",
+            'select_city': 'Выберите город:',
+            'select_category': 'Выберите категорию:',
+            'select_district': 'Выберите район:',
+            'select_delivery': 'Выберите тип доставки:',
+            'order_summary': "Информация о заказе:\n📦 Товар: {product}\n💵 Стоимость: {price}$\n🏙 Район: {district}\n🚚 Тип доставки: {delivery_type}\n\nВсё верно?",
+            'select_crypto': 'Выберите криптовалюту для оплаты:',
+            'payment_instructions': "Оплатите {amount} {currency} по адресу:\n`{payment_address}`\n\nОтсканируйте QR-код для оплаты:\nПосле оплаты товар будет выслан автоматически.",
+            'payment_timeout': 'Время оплата истекло. Заказ отменен.',
+            'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
+            'balance': 'Ваш баланс: {balance}$',
+            'balance_add': 'Введите сумму для пополнения баланса в $:',
+            'balance_add_success': 'Баланс пополнен на {amount}$. Текущий баланс: {balance}$',
+            'support': 'По всем вопросам обращайтесь к @support_username',
+            'bonuses': 'Бонусная система:\n- За каждую 5-ю покупку скидка 10%\n- Пригласи друга и получи 50$ на баланс',
+            'rules': 'Правила:\n1. Не сообщайте никому данные о заказе\n2. Оплата только в течение 60 минут\n3. При нарушении правил - бан',
+            'reviews': 'Наши отзывы: @reviews_channel',
+            'error': 'Произошла ошибка. Попробуйте позже.',
+            'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.',
+            'back': '⬅️ Назад',
+            'main_menu_button': '🏠 Главное меню',
+            'last_order': 'Информация о последнем заказе',
+            'no_orders': 'У вас еще не было заказов',
+            'main_menu_description': '''Добро пожаловать в магазин!
 
 Это телеграмм бот для быстрых покупок. 🛒 Так же есть официальный магазин Mega, нажимайте перейти и выбирайте среди огромного ассортимента! 🪏
 
 ❗️ Мы соблюдаем полную конфиденциальность наших клиентов. Мусора бляди! 🤙🏼💪''',
-                'balance_instructions': '''Ваш баланс: {balance}$
+            'balance_instructions': '''Ваш баланс: {balance}$
 
 Инструкция по пополнению баланса:
 Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
 English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ქართული: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
-                'balance_topup_info': '''💳 Пополнение баланса
+            'balance_topup_info': '''💳 Пополнение баланса
 
 ❗️ Важная информация:
 • Минимальная сумма пополнения: $1
 • Адрес кошелька резервируется на 30 минут
 • Все пополнения на этот адрес будут зачислены на ваш баланс
 • После истечения времени адрес освобождается'''
-            },
-            'en': {
-                'welcome': 'Welcome!',
-                'captcha': 'To enter, solve the captcha: {code}\nEnter 5 digits:',
-                'captcha_failed': 'Invalid captcha! Try again:',
-                'language_selected': 'Language set: English',
-                'main_menu': "👤 Name: {name}\n📛 Username: @{username}\n🛒 Purchases: {purchases}\n🎯 Discount: {discount}%\n💰 Balance: {balance}$",
-                'select_city': 'Select city:',
-                'select_category': 'Select category:',
-                'select_district': 'Select district:',
-                'select_delivery': 'Select delivery type:',
-                'order_summary': "Order information:\n📦 Product: {product}\n💵 Price: {price}$\n🏙 District: {district}\n🚚 Delivery type: {delivery_type}\n\nIs everything correct?",
-                'select_crypto': 'Select cryptocurrency for payment:',
-                'payment_instructions': "Pay {amount} {currency} to address:\n`{payment_address}`\n\nOr scan QR-code:\nAfter payment, the product will be sent automatically.",
-                'payment_timeout': 'Payment time has expired. Order canceled.',
-                'payment_success': 'Payment received! Your product:\n\n{product_image}',
-                'balance': 'Your balance: {balance}$',
-                'balance_add': 'Enter the amount to top up your balance in $:',
-                'balance_add_success': 'Balance topped up by {amount}$. Current balance: {balance}$',
-                'support': 'For all questions contact @support_username',
-                'bonuses': 'Bonus system:\n- 10% discount for every 5th purchase\n- Invite a friend and get 50$ on your balance',
-                'rules': 'Rules:\n1. Do not share order information with anyone\n2. Payment only within 60 minutes\n3. Ban for breaking the rules',
-                'reviews': 'Our reviews: @reviews_channel',
-                'error': 'An error occurred. Please try again later.',
-                'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.',
-                'back': '⬅️ Back',
-                'main_menu_button': '🏠 Main Menu',
-                'last_order': 'Information about last order',
-                'no_orders': 'You have no orders yet',
-                'main_menu_description': '''Welcome to the store!
+        },
+        'en': {
+            'welcome': 'Welcome!',
+            'captcha': 'To enter, solve the captcha: {code}\nEnter 5 digits:',
+            'captcha_failed': 'Invalid captcha! Try again:',
+            'language_selected': 'Language set: English',
+            'main_menu': "👤 Name: {name}\n📛 Username: @{username}\n🛒 Purchases: {purchases}\n🎯 Discount: {discount}%\n💰 Balance: {balance}$",
+            'select_city': 'Select city:',
+            'select_category': 'Select category:',
+            'select_district': 'Select district:',
+            'select_delivery': 'Select delivery type:',
+            'order_summary': "Order information:\n📦 Product: {product}\n💵 Price: {price}$\n🏙 District: {district}\n🚚 Delivery type: {delivery_type}\n\nIs everything correct?",
+            'select_crypto': 'Select cryptocurrency for payment:',
+            'payment_instructions': "Pay {amount} {currency} to address:\n`{payment_address}`\n\nOr scan QR-code:\nAfter payment, the product will be sent automatically.",
+            'payment_timeout': 'Payment time has expired. Order canceled.',
+            'payment_success': 'Payment received! Your product:\n\n{product_image}',
+            'balance': 'Your balance: {balance}$',
+            'balance_add': 'Enter the amount to top up your balance in $:',
+            'balance_add_success': 'Balance topped up by {amount}$. Current balance: {balance}$',
+            'support': 'For all questions contact @support_username',
+            'bonuses': 'Bonus system:\n- 10% discount for every 5th purchase\n- Invite a friend and get 50$ on your balance',
+            'rules': 'Rules:\n1. Do not share order information with anyone\n2. Payment only within 60 minutes\n3. Ban for breaking the rules',
+            'reviews': 'Our reviews: @reviews_channel',
+            'error': 'An error occurred. Please try again later.',
+            'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.',
+            'back': '⬅️ Back',
+            'main_menu_button': '🏠 Main Menu',
+            'last_order': 'Information about last order',
+            'no_orders': 'You have no orders yet',
+            'main_menu_description': '''Welcome to the store!
 
 This is a telegram bot for quick purchases. 🛒 There is also an official Mega store, click go and choose from a huge assortment! 🪏
 
 ❗️ We maintain complete confidentiality of our customers. Pig cops! 🤙🏼💪''',
-                'balance_instructions': '''Your balance: {balance}$
+            'balance_instructions': '''Your balance: {balance}$
 
 Balance top-up instructions:
 Russian: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
 English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
-                'balance_topup_info': '''💳 Balance top-up
+            'balance_topup_info': '''💳 Balance top-up
 
 ❗️ Important information:
 • Minimum top-up amount: $1
 • Wallet address is reserved for 30 minutes
 • All top-ups to this address will be credited to your balance
 • After the time expires, the address is released'''
-            },
-            'ka': {
-                'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
-                'captcha': 'შესასვლელად გადაწყვიტეთ captcha: {code}\nშეიყვანეთ 5 ციფრი:',
-                'captcha_failed': 'არასწორი captcha! სცადეთ თავიდან:',
-                'language_selected': 'ენა დაყენებულია: ქართული',
-                'main_menu': "👤 სახელი: {name}\n📛 მომხმარებლის სახელი: @{username}\n🛒 ყიდვები: {purchases}\n🎯 ფასდაკლება: {discount}%\n💰 ბალანსი: {balance}$",
-                'select_city': 'აირჩიეთ ქალაქი:',
-                'select_category': 'აირჩიეთ კატეგორია:',
-                'select_district': 'აირჩიეთ რაიონი:',
-                'select_delivery': 'აირჩიეთ მიწოდების ტიპი:',
-                'order_summary': "შეკვეთის ინფორმაცია:\n📦 პროდუქტი: {product}\n💵 ფასი: {price}$\n🏙 რაიონი: {district}\n🚚 მიწოდების ტიპი: {delivery_type}\n\nყველაფერი სწორია?",
-                'select_crypto': 'აირჩიეთ კრიპტოვალუტა გადასახდელად:',
-                'payment_instructions': "გადაიხადეთ {amount} {currency} მისამართზე:\n`{payment_address}`\n\nან სკანირება QR-კოდი:\nგადახდის შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად.",
-                'payment_timeout': 'გადახდის დრო ამოიწურა. შეკვეთა გაუქმებულია.',
-                'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
-                'balance': 'თქვენი ბალანსი: {balance}$',
-                'balance_add': 'შეიყვანეთ ბალანსის შევსების რაოდენობა $:',
-                'balance_add_success': 'ბალანსი შეივსო {amount}$-ით. მიმდინარე ბალანსი: {balance}$',
-                'support': 'ყველა კითხვისთვის დაუკავშირდით @support_username',
-                'bonuses': 'ბონუს სისტემა:\n- ყოველ მე-5 ყიდვაზე 10% ფასდაკლება\n- მოიწვიე მეგობარი და მიიღე 50$ ბალანსზე',
-                'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 60 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
-                'reviews': 'ჩვენი მიმოხილვები: @reviews_channel',
-                'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
-                'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.',
-                'back': '⬅️ უკან',
-                'main_menu_button': '🏠 მთავარი მენიუ',
-                'last_order': 'ბოლო შეკვეთის ინფორმაცია',
-                'no_orders': 'ჯერ არ გაქვთ შეკვეთები',
-                'main_menu_description': '''მაღაზიაში მოგესალმებით!
+        },
+        'ka': {
+            'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
+            'captcha': 'შესასვლელად გადაწყვიტეთ captcha: {code}\nშეიყვანეთ 5 ციფრი:',
+            'captcha_failed': 'არასწორი captcha! სცადეთ თავიდან:',
+            'language_selected': 'ენა დაყენებულია: ქართული',
+            'main_menu': "👤 სახელი: {name}\n📛 მომხმარებლის სახელი: @{username}\n🛒 ყიდვები: {purchases}\n🎯 ფასდაკლება: {discount}%\n💰 ბალანსი: {balance}$",
+            'select_city': 'აირჩიეთ ქალაქი:',
+            'select_category': 'აირჩიეთ კატეგორია:',
+            'select_district': 'აირჩიეთ რაიონი:',
+            'select_delivery': 'აირჩიეთ მიწოდების ტიპი:',
+            'order_summary': "შეკვეთის ინფორმაცია:\n📦 პროდუქტი: {product}\n💵 ფასი: {price}$\n🏙 რაიონი: {district}\n🚚 მიწოდების ტიპი: {delivery_type}\n\nყველაფერი სწორია?",
+            'select_crypto': 'აირჩიეთ კრიპტოვალუტა გადასახდელად:',
+            'payment_instructions': "გადაიხადეთ {amount} {currency} მისამართზე:\n`{payment_address}`\n\nან სკანირება QR-კოდი:\nგადახდის შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად.",
+            'payment_timeout': 'გადახდის დრო ამოიწურა. შეკვეთა გაუქმებულია.',
+            'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
+            'balance': 'თქვენი ბალანსი: {balance}$',
+            'balance_add': 'შეიყვანეთ ბალანსის შევსების რაოდენობა $:',
+            'balance_add_success': 'ბალანსი შეივსო {amount}$-ით. მიმდინარე ბალანსი: {balance}$',
+            'support': 'ყველა კითხვისთვის დაუკავშირდით @support_username',
+            'bonuses': 'ბონუს სისტემა:\n- ყოველ მე-5 ყიდვაზე 10% ფასდაკლება\n- მოიწვიე მეგობარი და მიიღე 50$ ბალანსზე',
+            'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 60 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
+            'reviews': 'ჩვენი მიმოხილვები: @reviews_channel',
+            'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
+            'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.',
+            'back': '⬅️ უკან',
+            'main_menu_button': '🏠 მთავარი მენიუ',
+            'last_order': 'ბოლო შეკვეთის ინფორმაცია',
+            'no_orders': 'ჯერ არ გაქვთ შეკვეთები',
+            'main_menu_description': '''მაღაზიაში მოგესალმებით!
 
 ეს არის ტელეგრამ ბოტი სწრაფი შესყიდვებისთვის. 🛒 ასევე არის ოფიციალური Mega მაღაზია, დააჭირეთ გადასვლას და აირჩიეთ უზარმაზარი ასორტიმენტიდან! 🪏
 
 ❗️ ჩვენ ვიცავთ ჩვენი კლიენტების სრულ კონფიდენციალურობას. ღორის პოლიციელები! 🤙🏼💪''',
-                'balance_instructions': '''თქვენი ბალანსი: {balance}$
+            'balance_instructions': '''თქვენი ბალანსი: {balance}$
 
 ბალანსის შევსების ინსტრუქცია:
 Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
 English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ქართული: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
-                'balance_topup_info': '''💳 ბალანსის შევსება
+            'balance_topup_info': '''💳 ბალანსის შევსება
 
 ❗️ მნიშვნელოვანი ინფორმაცია:
 • მინიმალური შევსების რაოდენობა: $1
 • საფულის მისამართი იყიდება 30 წუთის განმავლობაში
 • ყველა შევსება ამ მისამართზე ჩაირიცხება თქვენს ბალანსზე
 • დროის ამოწურვის შემდეგ მისამართი გათავისუფლდება'''
-            }
         }
-        
-        for lang, translations in default_texts.items():
-            for key, value in translations.items():
-                await conn.execute('''
-                INSERT INTO texts (lang, key, value)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (lang, key) DO NOTHING
-                ''', lang, key, value)
+    }
+    
+    for lang, translations in default_texts.items():
+        for key, value in translations.items():
+            await conn.execute('''
+            INSERT INTO texts (lang, key, value)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (lang, key) DO UPDATE SET value = EXCLUDED.value
+            ''', lang, key, value)
     
     # Проверяем и добавляем города
     cities_count = await conn.fetchval('SELECT COUNT(*) FROM cities')
@@ -454,7 +451,7 @@ async def load_cache():
             categories_rows = await conn.fetch('SELECT * FROM categories ORDER BY name')
             categories_cache = [dict(row) for row in categories_rows]
             
-            # Загрузка товаров
+            # Загрузка товары
             products_cache = {}
             for city in cities_cache:
                 products = await conn.fetch('''
@@ -485,8 +482,10 @@ async def load_cache():
 # Функция для получения текста
 def get_text(lang, key, **kwargs):
     if lang not in texts_cache:
+        logger.warning(f"Language {lang} not found in cache, using 'ru'")
         lang = 'ru'
     if key not in texts_cache[lang]:
+        logger.warning(f"Text key {key} not found for language {lang}. Available keys: {list(texts_cache[lang].keys())}")
         return f"Текст не найден: {key}"
     
     text = texts_cache[lang][key]

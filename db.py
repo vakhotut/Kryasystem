@@ -97,7 +97,7 @@ async def init_db(database_url):
         )
         ''')
         
-        # Новая таблица для городов
+        # Новая таблиция для городов
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS cities (
             id SERIAL PRIMARY KEY,
@@ -220,7 +220,25 @@ async def init_default_data(conn):
                 'back': '⬅️ Назад',
                 'main_menu_button': '🏠 Главное меню',
                 'last_order': 'Информация о последнем заказе',
-                'no_orders': 'У вас еще не было заказов'
+                'no_orders': 'У вас еще не было заказов',
+                'main_menu_description': '''Добро пожаловать в магазин!
+
+Это телеграмм бот для быстрых покупок. 🛒 Так же есть официальный магазин Mega, нажимайте перейти и выбирайте среди огромного ассортимента! 🪏
+
+❗️ Мы соблюдаем полную конфиденциальность наших клиентов. Мусора бляди! 🤙🏼💪''',
+                'balance_instructions': '''Ваш баланс: {balance}$
+
+Инструкция по пополнению баланса:
+Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
+English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
+ქართული: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
+                'balance_topup_info': '''💳 Пополнение баланса
+
+❗️ Важная информация:
+• Минимальная сумма пополнения: $1
+• Адрес кошелька резервируется на 30 минут
+• Все пополнения на этот адрес будут зачислены на ваш баланс
+• После истечения времени адрес освобождается'''
             },
             'en': {
                 'welcome': 'Welcome!',
@@ -249,7 +267,25 @@ async def init_default_data(conn):
                 'back': '⬅️ Back',
                 'main_menu_button': '🏠 Main Menu',
                 'last_order': 'Information about last order',
-                'no_orders': 'You have no orders yet'
+                'no_orders': 'You have no orders yet',
+                'main_menu_description': '''Welcome to the store!
+
+This is a telegram bot for quick purchases. 🛒 There is also an official Mega store, click go and choose from a huge assortment! 🪏
+
+❗️ We maintain complete confidentiality of our customers. Pig cops! 🤙🏼💪''',
+                'balance_instructions': '''Your balance: {balance}$
+
+Balance top-up instructions:
+Russian: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
+English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
+Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
+                'balance_topup_info': '''💳 Balance top-up
+
+❗️ Important information:
+• Minimum top-up amount: $1
+• Wallet address is reserved for 30 minutes
+• All top-ups to this address will be credited to your balance
+• After the time expires, the address is released'''
             },
             'ka': {
                 'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
@@ -278,7 +314,25 @@ async def init_default_data(conn):
                 'back': '⬅️ უკან',
                 'main_menu_button': '🏠 მთავარი მენიუ',
                 'last_order': 'ბოლო შეკვეთის ინფორმაცია',
-                'no_orders': 'ჯერ არ გაქვთ შეკვეთები'
+                'no_orders': 'ჯერ არ გაქვთ შეკვეთები',
+                'main_menu_description': '''მაღაზიაში მოგესალმებით!
+
+ეს არის ტელეგრამ ბოტი სწრაფი შესყიდვებისთვის. 🛒 ასევე არის ოფიციალური Mega მაღაზია, დააჭირეთ გადასვლას და აირჩიეთ უზარმაზარი ასორტიმენტიდან! 🪏
+
+❗️ ჩვენ ვიცავთ ჩვენი კლიენტების სრულ კონფიდენციალურობას. ღორის პოლიციელები! 🤙🏼💪''',
+                'balance_instructions': '''თქვენი ბალანსი: {balance}$
+
+ბალანსის შევსების ინსტრუქცია:
+Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
+English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
+ქართული: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
+                'balance_topup_info': '''💳 ბალანსის შევსება
+
+❗️ მნიშვნელოვანი ინფორმაცია:
+• მინიმალური შევსების რაოდენობა: $1
+• საფულის მისამართი იყიდება 30 წუთის განმავლობაში
+• ყველა შევსება ამ მისამართზე ჩაირიცხება თქვენს ბალანსზე
+• დროის ამოწურვის შემდეგ მისამართი გათავისუფლდება'''
             }
         }
         

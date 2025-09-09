@@ -328,7 +328,7 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
     for city in cities_cache:
         builder.row(InlineKeyboardButton(text=city['name'], callback_data=f"city_{city['name']}"))
     builder.row(
-        InlineKeyboardButton(text=f"💰 Баланс: {user['balance'] or 0}$", callback_data="balance"),
+        InlineKeyboardButton(text=f"💰 {get_text(lang, 'balance', balance=user['balance'] or 0)}", callback_data="balance"),
         InlineKeyboardButton(text="📦 Последний заказ", callback_data="last_order")
     )
     builder.row(

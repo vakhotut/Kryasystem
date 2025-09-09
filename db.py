@@ -508,11 +508,22 @@ async def update_user(user_id, **kwargs):
     if not valid_updates:
         return
         
-    set_clause = ", ".join([f"{k} = ${i+2}" for i, k in enumerate(valid_updates.keys())])
-    values = list(valid_updates.values()) + [user_id]
+    # Формируем SET часть запроса с правильной нумерацией параметров
+    set_parts = []
+    values = []
+    for i, (k, v) in enumerate(valid_updates.items(), start=1):
+        set_parts.append(f"{k} = ${i}")
+        values.append(v)
+    
+    # Добавляем user_id в конец списка значений
+    values.append(user_id)
+    set_clause = ", ".join(set_parts)
     
     async with db_pool.acquire() as conn:
-        await conn.execute(f'UPDATE users SET {set_clause} WHERE user_id = ${len(values)}', *values)
+        await conn.execute(
+            f'UPDATE users SET {set_clause} WHERE user_id = ${len(values)}',
+            *values
+        )
 
 async def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid):
     async with db_pool.acquire() as conn:

@@ -578,40 +578,59 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
         await state.set_state(Form.category)
         return
     
-    product_name = data.replace('prod_', '')
-    city_data = await state.get_data()
-    city = city_data.get('city')
-    category = city_data.get('category')
-    
-    # Получаем актуальные кэши
-    products_cache = get_products_cache()
-    
-    if city not in products_cache or product_name not in products_cache[city]:
+    if data.startswith('prod_'):
+        product_name = data.replace('prod_', '')
+        city_data = await state.get_data()
+        city = city_data.get('city')
+        category = city_data.get('category')
+        
+        # Получаем актуальные кэши
+        products_cache = get_products_cache()
+        
+        if city not in products_cache or product_name not in products_cache[city]:
+            sent_message = await callback.message.answer(
+                text=get_text(lang, 'error')
+            )
+            await state.update_data(last_message_id=sent_message.message_id)
+            return
+        
+        product_info = products_cache[city][product_name]
+        await state.update_data(product=product_name)
+        await state.update_data(price=product_info['price'])
+        
+        # Получаем актуальные кэши
+        districts_cache = get_districts_cache()
+        districts = districts_cache.get(city, [])
+        
+        builder = InlineKeyboardBuilder()
+        for district in districts:
+            builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
+        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_category"))
+        
         sent_message = await callback.message.answer(
-            text=get_text(lang, 'error')
+            text=get_text(lang, 'select_district'),
+            reply_markup=builder.as_markup()
         )
         await state.update_data(last_message_id=sent_message.message_id)
-        return
-    
-    product_info = products_cache[city][product_name]
-    await state.update_data(product=product_name)
-    await state.update_data(price=product_info['price'])
-    
-    # Получаем актуальные кэши
-    districts_cache = get_districts_cache()
-    districts = districts_cache.get(city, [])
-    
-    builder = InlineKeyboardBuilder()
-    for district in districts:
-        builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
-    builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_category"))
-    
-    sent_message = await callback.message.answer(
-        text=get_text(lang, 'select_district'),
-        reply_markup=builder.as_markup()
-    )
-    await state.update_data(last_message_id=sent_message.message_id)
-    await state.set_state(Form.district)
+        await state.set_state(Form.district)
+    elif data.startswith('dist_'):
+        district = data.replace('dist_', '')
+        await state.update_data(district=district)
+        
+        # Получаем актуальные кэши
+        delivery_types_cache = get_delivery_types_cache()
+        
+        builder = InlineKeyboardBuilder()
+        for del_type in delivery_types_cache:
+            builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
+        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
+        
+        sent_message = await callback.message.answer(
+            text=get_text(lang, 'select_delivery'),
+            reply_markup=builder.as_markup()
+        )
+        await state.update_data(last_message_id=sent_message.message_id)
+        await state.set_state(Form.delivery)
 
 @dp.callback_query(Form.delivery)
 async def process_delivery(callback: types.CallbackQuery, state: FSMContext):

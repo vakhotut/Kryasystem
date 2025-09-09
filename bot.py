@@ -53,6 +53,8 @@ class Form(StatesGroup):
     crypto_currency = State()
     payment = State()
     balance = State()
+    balance_menu = State()
+    topup_currency = State()
 
 # Глобальные переменные
 bot = Bot(token=TOKEN)
@@ -190,6 +192,47 @@ async def process_successful_payment(order_id):
     except Exception as e:
         logger.error(f"Error processing successful payment: {e}")
 
+# Функция для показа меню баланса
+async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user_data = await get_user(user_id)
+    lang = user_data['language'] or 'ru'
+    
+    balance_text = get_text(lang, 'balance_instructions', balance=user_data['balance'] or 0)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="topup_balance"))
+    builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+    
+    image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
+    
+    await callback.message.answer_photo(
+        photo=image_url,
+        caption=balance_text,
+        reply_markup=builder.as_markup()
+    )
+
+# Функция для показа меню выбора валюты пополнения
+async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user_data = await get_user(user_id)
+    lang = user_data['language'] or 'ru'
+    
+    topup_info = get_text(lang, 'balance_topup_info')
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="LTC", callback_data="topup_ltc"))
+    builder.row(InlineKeyboardButton(text="BTC", callback_data="topup_btc"))
+    builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_balance_menu"))
+    
+    image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
+    
+    await callback.message.answer_photo(
+        photo=image_url,
+        caption=topup_info,
+        reply_markup=builder.as_markup()
+    )
+
 # Обработчики команд и состояний
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -266,7 +309,9 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
     # Получаем актуальные кэши
     cities_cache = get_cities_cache()
     
-    shop_description = "🏪 AutoShop - лучшие товары с доставка по Грузии\n\n"
+    # Используем новый текст описания магазина
+    shop_description = get_text(lang, 'main_menu_description') + "\n\n"
+    
     user_info_text = get_text(
         lang, 
         'main_menu', 
@@ -294,10 +339,10 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         InlineKeyboardButton(text="👨‍💻 Оператор", callback_data="operator"),
         InlineKeyboardButton(text="🔧 Техподдержка", callback_data="support")
     )
-    builder.row(InlineKeyboardButton(text="📢 Наш каannel", callback_data="channel"))
+    builder.row(InlineKeyboardButton(text="📢 Наш канал", callback_data="channel"))
     builder.row(InlineKeyboardButton(text="⭐ Отзывы", callback_data="reviews"))
     builder.row(InlineKeyboardButton(text="🌐 Наш сайт", callback_data="website"))
-    builder.row(InlineKeyboardButton(text="🤖 Личный бot", callback_data="personal_bot"))
+    builder.row(InlineKeyboardButton(text="🤖 Личный бот", callback_data="personal_bot"))
     
     image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
     
@@ -345,11 +390,8 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.category)
     elif data == 'balance':
-        sent_message = await callback.message.answer(
-            text=get_text(lang, 'balance_add')
-        )
-        await state.update_data(last_message_id=sent_message.message_id)
-        await state.set_state(Form.balance)
+        await show_balance_menu(callback, state)
+        await state.set_state(Form.balance_menu)
     elif data == 'last_order':
         last_order = await get_last_order(user_id)
         if last_order:
@@ -407,6 +449,41 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
     elif data == 'back_to_main':
         await show_main_menu(callback.message, state, user_id, lang)
         await state.set_state(Form.main_menu)
+
+@dp.callback_query(Form.balance_menu)
+async def process_balance_menu(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    user_data = await get_user(user_id)
+    lang = user_data['language'] or 'ru'
+    data = callback.data
+    
+    if data == 'topup_balance':
+        await show_topup_currency_menu(callback, state)
+        await state.set_state(Form.topup_currency)
+    elif data == 'back_to_main':
+        await show_main_menu(callback.message, state, user_id, lang)
+        await state.set_state(Form.main_menu)
+
+@dp.callback_query(Form.topup_currency)
+async def process_topup_currency(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    user_id = callback.from_user.id
+    user_data = await get_user(user_id)
+    lang = user_data['language'] or 'ru'
+    data = callback.data
+    
+    if data == 'back_to_balance_menu':
+        await show_balance_menu(callback, state)
+        await state.set_state(Form.balance_menu)
+    elif data in ['topup_ltc', 'topup_btc']:
+        currency = 'LTC' if data == 'topup_ltc' else 'BTC'
+        await state.update_data(topup_currency=currency)
+        
+        await callback.message.answer(get_text(lang, 'balance_add'))
+        await state.set_state(Form.balance)
 
 @dp.callback_query(Form.category)
 async def process_category(callback: types.CallbackQuery, state: FSMContext):
@@ -791,16 +868,58 @@ async def process_balance(message: types.Message, state: FSMContext):
             await message.answer(get_text(lang, 'error'))
             return
         
-        current_balance = user_data['balance'] or 0
-        new_balance = current_balance + amount
-        await update_user(user.id, balance=new_balance)
+        # Получаем выбранную валюту из состояния
+        state_data = await state.get_data()
+        currency = state_data.get('topup_currency', 'LTC')
         
-        await message.answer(
-            get_text(lang, 'balance_add_success', amount=amount, balance=new_balance)
+        # Создаем инвойс для пополнения баланса
+        order_id = f"topup_{int(time.time())}_{user.id}"
+        
+        invoice_resp = await create_cryptocloud_invoice(amount, currency, order_id)
+        
+        if not invoice_resp or invoice_resp.get('status') != 'success' or not invoice_resp.get('result'):
+            await message.answer(get_text(lang, 'error'))
+            return
+            
+        invoice_data = invoice_resp['result']
+        invoice_uuid = invoice_data.get('uuid')
+        payment_url = invoice_data.get('link') or invoice_data.get('pay_url')
+        address = invoice_data.get('address') or ''
+        
+        expires_at = datetime.now() + timedelta(minutes=30)
+        await add_transaction(
+            user.id,
+            amount,
+            currency,
+            order_id,
+            payment_url,
+            expires_at,
+            f"Пополнение баланса на {amount}$",
+            invoice_uuid
         )
         
-        await show_main_menu(message, state, user.id, lang)
-        await state.set_state(Form.main_menu)
+        if address:
+            qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={address}"
+            payment_text = get_text(
+                lang,
+                'payment_instructions',
+                amount=amount,
+                currency=currency,
+                payment_address=address
+            )
+            
+            try:
+                await message.answer_photo(
+                    photo=qr_code_url,
+                    caption=payment_text
+                )
+            except Exception as e:
+                logger.error(f"Error sending QR code: {e}")
+                await message.answer(text=payment_text)
+        else:
+            fallback_text = f"Не удалось получить адрес напрямую. Откройте страницу оплаты: {payment_url}"
+            await message.answer(text=fallback_text)
+            
     except ValueError:
         await message.answer(get_text(lang, 'error'))
 

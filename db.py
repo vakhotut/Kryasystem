@@ -118,7 +118,7 @@ async def init_db(database_url):
         # Новая таблица для категорий товаров
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS categories (
-            id SERIAL PRIMARY KEY,
+            id SERial PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )

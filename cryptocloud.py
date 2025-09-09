@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY")
 CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID")
 
-async def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=None, shop_id=None, poll_attempts=30, poll_interval=1):
+async def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=None, shop_id=None, poll_attempts=30, poll_interval=1, test_mode=None):
     """
     Создание инвойса в CryptoCloud с попыткой получить address.
     :param amount: Сумма в USD
@@ -20,6 +20,7 @@ async def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=No
     :param shop_id: Можно передать shop_id (по умолчанию берётся CRYPTOCLOUD_SHOP_ID)
     :param poll_attempts: сколько раз перепроверить merchant/info если address пустой
     :param poll_interval: пауза между попытками в секундах
+    :param test_mode: Режим тестирования (True/False)
     :return: полный json-ответ от API или None
     """
     url = "https://api.cryptocloud.plus/v2/invoice/create"
@@ -48,6 +49,11 @@ async def create_cryptocloud_invoice(amount, crypto_currency, order_id, email=No
             "available_currencies": [crypto_code]
         }
     }
+    
+    # Добавляем test_mode если указан
+    if test_mode is not None:
+        payload["test_mode"] = test_mode
+        
     if email:
         payload["email"] = email
 

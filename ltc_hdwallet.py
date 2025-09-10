@@ -1,7 +1,7 @@
 import os
 from hdwallet import HDWallet
 from hdwallet.cryptocurrencies import Litecoin
-from hdwallet.utils import generate_mnemonic  # Или альтернативный способ
+from hdwallet.utils import generate_mnemonic  # Используем встроенный генератор
 from typing import Dict, Any
 import logging
 
@@ -17,7 +17,7 @@ class LTCWallet:
             # В продакшене нужно сохранить этот мнемоник в безопасное место
         
         self.hdwallet = HDWallet(cryptocurrency=Litecoin)
-        # Передаем мнемонику как строку, но метод может требовать объект
+        # Передаем мнемонику как строку - библиотека сама обработает ее
         self.hdwallet.from_mnemonic(mnemonic=self.mnemonic)
         self.address_index = 0
         logger.info("LTC Wallet initialized")

@@ -38,8 +38,9 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("BOT_TOKEN")
 CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY")
 CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID")
+CRYPTOCLOUD_SECRET_KEY = os.getenv("CRYPTOCLOUD_SECRET_KEY")  # Добавлен секретный ключ
 DATABASE_URL = os.environ.get('DATABASE_URL')
-POSTBACK_SECRET = os.getenv("POSTBACK_SECRET", CRYPTOCLOUD_API_KEY)
+POSTBACK_SECRET = os.getenv("POSTBACK_SECRET", CRYPTOCLOUD_SECRET_KEY)
 
 # Состояния разговора
 class Form(StatesGroup):
@@ -115,46 +116,53 @@ async def check_pending_transactions_loop():
             logger.error(f"Error in check_pending_transactions: {e}")
             await asyncio.sleep(60)
 
-# Обработчик POSTBACK уведомлений от CryptoCloud
+# Обработчик POSTBACK уведомлений от CryptoCloud (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 async def handle_cryptocloud_postback(request):
     try:
+        # Читаем данные в формате x-www-form-urlencoded
         data = await request.post()
         data_dict = dict(data)
         
-        # Проверяем наличие сигнатуры или токена
-        if 'signature' in data_dict:
-            # Проверка HMAC подписи
-            signature = data_dict['signature']
-            verify_data = data_dict.copy()
-            del verify_data['signature']
+        logger.info(f"Received CryptoCloud postback: {data_dict}")
+        
+        # Проверяем наличие обязательных полей
+        if 'token' not in data_dict:
+            logger.warning("No token in CryptoCloud postback")
+            return web.json_response({'status': 'error', 'message': 'No token'}, status=400)
             
-            sorted_data = sorted(verify_data.items())
-            message = "&".join([f"{k}={v}" for k, v in sorted_data]) + POSTBACK_SECRET
-            expected_signature = hashlib.sha256(message.encode()).hexdigest()
+        if 'status' not in data_dict:
+            logger.warning("No status in CryptoCloud postback")
+            return web.json_response({'status': 'error', 'message': 'No status'}, status=400)
             
-            if not hmac.compare_digest(signature, expected_signature):
-                logger.warning("Invalid signature in CryptoCloud postback")
-                return web.json_response({'status': 'error', 'message': 'Invalid signature'}, status=403)
-        else:
-            # Проверка JWT токена
-            token = data_dict.get('token')
-            if not token:
-                logger.warning("No token in CryptoCloud postback")
-                return web.json_response({'status': 'error', 'message': 'No token'}, status=403)
+        if 'order_id' not in data_dict:
+            logger.warning("No order_id in CryptoCloud postback")
+            return web.json_response({'status': 'error', 'message': 'No order_id'}, status=400)
+
+        # Проверяем JWT токен с использованием SECRET_KEY
+        token = data_dict['token']
+        if not CRYPTOCLOUD_SECRET_KEY:
+            logger.error("CRYPTOCLOUD_SECRET_KEY is not set in environment variables")
+            return web.json_response({'status': 'error', 'message': 'Server misconfiguration'}, status=500)
             
-            try:
-                # Декодируем JWT с использованием API ключа как секрета
-                decoded = jwt.decode(token, CRYPTOCLOUD_API_KEY, algorithms=['HS256'])
-            except jwt.InvalidTokenError:
-                logger.warning("Invalid token in CryptoCloud postback")
-                return web.json_response({'status': 'error', 'message': 'Invalid token'}, status=403)
+        try:
+            # Декодируем JWT с использованием SECRET_KEY
+            decoded = jwt.decode(token, CRYPTOCLOUD_SECRET_KEY, algorithms=['HS256'])
+            logger.info(f"Successfully decoded JWT token: {decoded}")
+        except jwt.ExpiredSignatureError:
+            logger.warning("Token expired in CryptoCloud postback")
+            return web.json_response({'status': 'error', 'message': 'Token expired'}, status=403)
+        except jwt.InvalidTokenError as e:
+            logger.warning(f"Invalid token in CryptoCloud postback: {e}")
+            return web.json_response({'status': 'error', 'message': 'Invalid token'}, status=403)
 
         # Обработка успешного платежа
-        status = data_dict.get('status')
-        order_id = data_dict.get('order_id')
+        status = data_dict['status']
+        order_id = data_dict['order_id']
         
         if status == 'success' and order_id:
+            # Запускаем обработку в фоне
             asyncio.create_task(process_successful_payment(order_id))
+            logger.info(f"Successfully received postback for order {order_id}")
         
         return web.json_response({'status': 'ok'})
         
@@ -167,13 +175,33 @@ async def process_successful_payment(order_id):
         async with db_pool.acquire() as conn:
             transaction = await conn.fetchrow('SELECT * FROM transactions WHERE order_id = $1', order_id)
         
-        if transaction:
-            await update_transaction_status(order_id, 'paid')
+        if not transaction:
+            logger.error(f"Transaction not found for order_id: {order_id}")
+            return
             
-            user_id = transaction['user_id']
-            product_info = transaction['product_info']
-            price = transaction['amount']
+        await update_transaction_status(order_id, 'paid')
+        
+        user_id = transaction['user_id']
+        product_info = transaction['product_info']
+        price = transaction['amount']
+        
+        # Проверяем, является ли это пополнением баланса
+        if "Пополнение баланса" in product_info:
+            # Пополняем баланс пользователя
+            user = await get_user(user_id)
+            new_balance = (user['balance'] or 0) + price
+            await update_user(user_id, balance=new_balance)
             
+            lang = user['language'] or 'ru' if user else 'ru'
+            
+            await bot.send_message(
+                chat_id=user_id,
+                text=get_text(lang, 'balance_add_success', amount=price, balance=new_balance)
+            )
+            
+            logger.info(f"Balance topped up for user {user_id}: +{price}$, new balance: {new_balance}$")
+        else:
+            # Обычная покупка товара
             await add_purchase(
                 user_id,
                 product_info,
@@ -196,7 +224,7 @@ async def process_successful_payment(order_id):
                 text=get_text(lang, 'payment_success', product_image=product_image)
             )
             
-            logger.info(f"Successfully processed postback for order {order_id}")
+            logger.info(f"Successfully processed purchase for user {user_id}, order {order_id}")
     
     except Exception as e:
         logger.error(f"Error processing successful payment: {e}")

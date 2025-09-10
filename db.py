@@ -60,16 +60,23 @@ async def init_db(database_url):
             expires_at TIMESTAMP,
             product_info TEXT,
             invoice_uuid TEXT,
+            crypto_address TEXT,
+            crypto_amount REAL,
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
         ''')
         
-        # Проверяем существование столбца invoice_uuid и добавляем его, если нет
-        try:
-            await conn.execute("SELECT invoice_uuid FROM transactions LIMIT 1")
-        except Exception as e:
-            await conn.execute('ALTER TABLE transactions ADD COLUMN invoice_uuid TEXT')
-            logger.info("Added invoice_uuid column to transactions table")
+        # Проверяем существование столбцов и добавляем их, если нет
+        columns_to_check = [
+            'invoice_uuid', 'crypto_address', 'crypto_amount'
+        ]
+        
+        for column in columns_to_check:
+            try:
+                await conn.execute(f"SELECT {column} FROM transactions LIMIT 1")
+            except Exception:
+                await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} TEXT')
+                logger.info(f"Added {column} column to transactions table")
         
         # Таблица покупки
         await conn.execute('''
@@ -151,35 +158,21 @@ async def init_db(database_url):
         ''')
         
         # Добавляем недостающие столбцы, если они еще не существуют
-        try:
-            await conn.execute("SELECT category_id FROM products LIMIT 1")
-        except Exception:
-            await conn.execute('ALTER TABLE products ADD COLUMN category_id INTEGER REFERENCES categories(id)')
-            logger.info("Added category_id column to products table")
-            
-        try:
-            await conn.execute("SELECT district_id FROM products LIMIT 1")
-        except Exception:
-            await conn.execute('ALTER TABLE products ADD COLUMN district_id INTEGER REFERENCES districts(id)')
-            logger.info("Added district_id column to products table")
-            
-        try:
-            await conn.execute("SELECT delivery_type_id FROM products LIMIT 1")
-        except Exception:
-            await conn.execute('ALTER TABLE products ADD COLUMN delivery_type_id INTEGER REFERENCES delivery_types(id)')
-            logger.info("Added delivery_type_id column to products table")
-            
-        try:
-            await conn.execute("SELECT uuid FROM products LIMIT 1")
-        except Exception:
-            await conn.execute('ALTER TABLE products ADD COLUMN uuid TEXT UNIQUE')
-            logger.info("Added uuid column to products table")
-            
-        try:
-            await conn.execute("SELECT description FROM products LIMIT 1")
-        except Exception:
-            await conn.execute('ALTER TABLE products ADD COLUMN description TEXT')
-            logger.info("Added description column to products table")
+        columns_to_check = [
+            'category_id', 'district_id', 'delivery_type_id', 'uuid', 'description'
+        ]
+        
+        for column in columns_to_check:
+            try:
+                await conn.execute(f"SELECT {column} FROM products LIMIT 1")
+            except Exception:
+                if column == 'uuid':
+                    await conn.execute(f'ALTER TABLE products ADD COLUMN {column} TEXT UNIQUE')
+                elif column == 'description':
+                    await conn.execute(f'ALTER TABLE products ADD COLUMN {column} TEXT')
+                else:
+                    await conn.execute(f'ALTER TABLE products ADD COLUMN {column} INTEGER REFERENCES {column.split("_")[0] + "s"}(id)')
+                logger.info(f"Added {column} column to products table")
         
         # Заполняем таблицы начальными данными, если они пустые
         await init_default_data(conn)
@@ -202,7 +195,7 @@ async def init_default_data(conn):
             'select_delivery': 'Выберите тип доставки:',
             'order_summary': "Информация о заказе:\n📦 Товар: {product}\n💵 Стоимость: {price}$\n🏙 Район: {district}\n🚚 Тип доставки: {delivery_type}\n\nВсё верно?",
             'select_crypto': 'Выберите криптовалюту для оплаты:',
-            'payment_instructions': "Оплатите {amount} {currency} по адресу:\n`{payment_address}`\n\nОтсканируйте QR-код для оплаты:\nПосле оплаты товар будет выслан автоматически.",
+            'payment_instructions': "Оплатите {amount} {currency} на адрес:\n`{payment_address}`\n\nОтсканируйте QR-код для оплаты:\nПосле подтверждения 3 сетевых подтверждений товар будет выслан автоматически.",
             'payment_timeout': 'Время оплата истекло. Заказ отменен.',
             'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
             'balance': 'Ваш баланс: {balance}$',
@@ -249,7 +242,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
             'select_delivery': 'Select delivery type:',
             'order_summary': "Order information:\n📦 Product: {product}\n💵 Price: {price}$\n🏙 District: {district}\n🚚 Delivery type: {delivery_type}\n\nIs everything correct?",
             'select_crypto': 'Select cryptocurrency for payment:',
-            'payment_instructions': "Pay {amount} {currency} to address:\n`{payment_address}`\n\nOr scan QR-code:\nAfter payment, the product will be sent automatically.",
+            'payment_instructions': "Pay {amount} {currency} to address:\n`{payment_address}`\n\nOr scan QR-code:\nAfter 3 network confirmations, the product will be sent automatically.",
             'payment_timeout': 'Payment time has expired. Order canceled.',
             'payment_success': 'Payment received! Your product:\n\n{product_image}',
             'balance': 'Your balance: {balance}$',
@@ -296,7 +289,7 @@ Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბა�
             'select_delivery': 'აირჩიეთ მიწოდების ტიპი:',
             'order_summary': "შეკვეთის ინფორმაცია:\n📦 პროდუქტი: {product}\n💵 ფასი: {price}$\n🏙 რაიონი: {district}\n🚚 მიწოდების ტიპი: {delivery_type}\n\nყველაფერი სწორია?",
             'select_crypto': 'აირჩიეთ კრიპტოვალუტა გადასახდელად:',
-            'payment_instructions': "გადაიხადეთ {amount} {currency} მისამართზე:\n`{payment_address}`\n\nან სკანირება QR-კოდი:\nგადახდის შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად.",
+            'payment_instructions': "გადაიხადეთ {amount} {currency} მისამართზე:\n`{payment_address}`\n\nან სკანირება QR-კოდი:\n3 ქსელური დადასტურების შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად.",
             'payment_timeout': 'გადახდის დრო ამოიწურა. შეკვეთა გაუქმებულია.',
             'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
             'balance': 'თქვენი ბალანსი: {balance}$',
@@ -525,12 +518,12 @@ async def update_user(user_id, **kwargs):
             *values
         )
 
-async def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid):
+async def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address=None, crypto_amount=None):
     async with db_pool.acquire() as conn:
         await conn.execute('''
-        INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid)
+        INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount)
 
 async def add_purchase(user_id, product, price, district, delivery_type):
     async with db_pool.acquire() as conn:

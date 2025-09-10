@@ -1,7 +1,7 @@
 import os
 from hdwallet import HDWallet
-from hdwallet.cryptocurrencies import Litecoin  # Импорт конкретной криптовалюты
-from mnemonic import Mnemonic
+from hdwallet.cryptocurrencies import Litecoin
+from hdwallet.utils import generate_mnemonic  # Или альтернативный способ
 from typing import Dict, Any
 import logging
 
@@ -11,14 +11,13 @@ class LTCWallet:
     def __init__(self):
         self.mnemonic = os.getenv("LTC_MNEMONIC")
         if not self.mnemonic:
-            # Генерация новой мнемонической фразы
-            mnemo = Mnemonic("english")
-            self.mnemonic = mnemo.generate(strength=128)  # 128 бит = 12 слов
+            # Генерация новой мнемонической фразы с помощью hdwallet
+            self.mnemonic = generate_mnemonic(language="english", strength=128)
             logger.warning(f"Generated new mnemonic: {self.mnemonic}")
             # В продакшене нужно сохранить этот мнемоник в безопасное место
         
-        # Используем правильный аргумент cryptocurrency вместо symbol
         self.hdwallet = HDWallet(cryptocurrency=Litecoin)
+        # Передаем мнемонику как строку, но метод может требовать объект
         self.hdwallet.from_mnemonic(mnemonic=self.mnemonic)
         self.address_index = 0
         logger.info("LTC Wallet initialized")

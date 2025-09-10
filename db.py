@@ -569,6 +569,15 @@ async def is_banned(user_id):
             return False
     return False
 
+# Функция для проверки активного инвойса на пополнение баланса
+async def has_active_invoice(user_id):
+    async with db_pool.acquire() as conn:
+        active_invoice = await conn.fetchrow(
+            "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW() AND product_info LIKE 'Пополнение баланса%'",
+            user_id
+        )
+        return active_invoice is not None
+
 # Функции-геттеры для доступа к актуальным кэшам
 def get_cities_cache():
     return cities_cache

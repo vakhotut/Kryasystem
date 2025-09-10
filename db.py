@@ -3,6 +3,7 @@ from asyncpg.pool import Pool
 from datetime import datetime
 import logging
 import uuid
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -26,210 +27,217 @@ categories_cache = []
 # Инициализация базы данных
 async def init_db(database_url):
     global db_pool
-    db_pool = await asyncpg.create_pool(database_url, ssl='require')
-    
-    async with db_pool.acquire() as conn:
-        # Таблица пользователей
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            language TEXT DEFAULT 'ru',
-            captcha_passed INTEGER DEFAULT 0,
-            ban_until TIMESTAMP NULL,
-            failed_payments INTEGER DEFAULT 0,
-            purchase_count INTEGER DEFAULT 0,
-            discount INTEGER DEFAULT 0,
-            balance REAL DEFAULT 0.0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
+    try:
+        db_pool = await asyncpg.create_pool(database_url, ssl='require', min_size=1, max_size=10)
+        logger.info("Database pool created successfully")
         
-        # Таблица транзакций
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            amount REAL,
-            currency TEXT,
-            status TEXT,
-            order_id TEXT,
-            payment_url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP,
-            product_info TEXT,
-            invoice_uuid TEXT,
-            crypto_address TEXT,
-            crypto_amount REAL,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-        ''')
-        
-        # Проверяем существование столбцов и добавляем их, если нет
-        columns_to_check = [
-            'invoice_uuid', 'crypto_address', 'crypto_amount'
-        ]
-        
-        for column in columns_to_check:
-            try:
-                await conn.execute(f"SELECT {column} FROM transactions LIMIT 1")
-            except Exception:
-                await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} TEXT')
-                logger.info(f"Added {column} column to transactions table")
-        
-        # Таблица покупки
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS purchases (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            product TEXT,
-            price REAL,
-            district TEXT,
-            delivery_type TEXT,
-            purchase_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'completed',
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-        ''')
-        
-        # Новая таблида для текстов
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS texts (
-            id SERIAL PRIMARY KEY,
-            lang TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value TEXT NOT NULL,
-            UNIQUE(lang, key)
-        )
-        ''')
-        
-        # Новая таблица для городов
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS cities (
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
-        )
-        ''')
-        
-        # Новая таблица для районов
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS districts (
-            id SERIAL PRIMARY KEY,
-            city_id INTEGER REFERENCES cities(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,
-            UNIQUE(city_id, name)
-        )
-        ''')
-        
-        # Новая таблица для категорий товаров
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS categories (
-            id SERial PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        # Новая таблица для типов доставки
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS delivery_types (
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
-        )
-        ''')
-        
-        # Новая таблица для товаров
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            uuid TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            description TEXT,
-            price REAL NOT NULL,
-            image_url TEXT,
-            category_id INTEGER REFERENCES categories(id),
-            city_id INTEGER REFERENCES cities(id),
-            district_id INTEGER REFERENCES districts(id),
-            delivery_type_id INTEGER REFERENCES delivery_types(id),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        # Добавляем недостающие столбцы, если они еще не существуют
-        columns_to_check = [
-            'category_id', 'district_id', 'delivery_type_id', 'uuid', 'description'
-        ]
-        
-        for column in columns_to_check:
-            try:
-                await conn.execute(f"SELECT {column} FROM products LIMIT 1")
-            except Exception:
-                if column == 'uuid':
-                    await conn.execute(f'ALTER TABLE products ADD COLUMN {column} TEXT UNIQUE')
-                elif column == 'description':
-                    await conn.execute(f'ALTER TABLE products ADD COLUMN {column} TEXT')
-                else:
-                    await conn.execute(f'ALTER TABLE products ADD COLUMN {column} INTEGER REFERENCES {column.split("_")[0] + "s"}(id)')
-                logger.info(f"Added {column} column to products table")
-        
-        # Заполняем таблицы начальными данными, если они пустые
-        await init_default_data(conn)
-        
-    return db_pool
+        async with db_pool.acquire() as conn:
+            # Таблица пользователей
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                language TEXT DEFAULT 'ru',
+                captcha_passed INTEGER DEFAULT 0,
+                ban_until TIMESTAMP NULL,
+                failed_payments INTEGER DEFAULT 0,
+                purchase_count INTEGER DEFAULT 0,
+                discount INTEGER DEFAULT 0,
+                balance REAL DEFAULT 0.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            ''')
+            
+            # Таблица транзакций
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                amount REAL,
+                currency TEXT,
+                status TEXT,
+                order_id TEXT,
+                payment_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                product_info TEXT,
+                invoice_uuid TEXT,
+                crypto_address TEXT,
+                crypto_amount REAL,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+            ''')
+            
+            # Проверяем существование столбцов и добавляем их, если нет
+            columns_to_check = [
+                'invoice_uuid', 'crypto_address', 'crypto_amount'
+            ]
+            
+            for column in columns_to_check:
+                try:
+                    await conn.execute(f"SELECT {column} FROM transactions LIMIT 1")
+                except Exception:
+                    await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} TEXT')
+                    logger.info(f"Added {column} column to transactions table")
+            
+            # Таблица покупки
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS purchases (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                product TEXT,
+                price REAL,
+                district TEXT,
+                delivery_type TEXT,
+                purchase_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'completed',
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+            ''')
+            
+            # Новая таблида для текстов
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS texts (
+                id SERIAL PRIMARY KEY,
+                lang TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                UNIQUE(lang, key)
+            )
+            ''')
+            
+            # Новая таблица для городов
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS cities (
+                id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL
+            )
+            ''')
+            
+            # Новая таблица для районов
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS districts (
+                id SERIAL PRIMARY KEY,
+                city_id INTEGER REFERENCES cities(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                UNIQUE(city_id, name)
+            )
+            ''')
+            
+            # Новая таблица для категорий товаров
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS categories (
+                id SERial PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            ''')
+            
+            # Новая таблица для типов доставки
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS delivery_types (
+                id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL
+            )
+            ''')
+            
+            # Новая таблица для товаров
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS products (
+                id SERIAL PRIMARY KEY,
+                uuid TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                price REAL NOT NULL,
+                image_url TEXT,
+                category_id INTEGER REFERENCES categories(id),
+                city_id INTEGER REFERENCES cities(id),
+                district_id INTEGER REFERENCES districts(id),
+                delivery_type_id INTEGER REFERENCES delivery_types(id),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            ''')
+            
+            # Добавляем недостающие столбцы, если они еще не существуют
+            columns_to_check = [
+                'category_id', 'district_id', 'delivery_type_id', 'uuid', 'description'
+            ]
+            
+            for column in columns_to_check:
+                try:
+                    await conn.execute(f"SELECT {column} FROM products LIMIT 1")
+                except Exception:
+                    if column == 'uuid':
+                        await conn.execute(f'ALTER TABLE products ADD COLUMN {column} TEXT UNIQUE')
+                    elif column == 'description':
+                        await conn.execute(f'ALTER TABLE products ADD COLUMN {column} TEXT')
+                    else:
+                        await conn.execute(f'ALTER TABLE products ADD COLUMN {column} INTEGER REFERENCES {column.split("_")[0] + "s"}(id)')
+                    logger.info(f"Added {column} column to products table")
+            
+            # Заполняем таблицы начальными данными, если они пустые
+            await init_default_data(conn)
+            
+        return db_pool
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        logger.error(traceback.format_exc())
+        raise
 
 # Функция для заполнения начальных данных
 async def init_default_data(conn):
-    # Всегда обновляем тексты, даже если они уже существуют
-    default_texts = {
-        'ru': {
-            'welcome': 'Добро пожаловать!',
-            'captcha': 'Для входа решите каптчу: {code}\nВведите 5 цифр:',
-            'captcha_failed': 'Неверная каптча! Попробуйте снова:',
-            'language_selected': 'Язык установлен: Русский',
-            'main_menu': "👤 Имя: {name}\n📛 Юзернейм: @{username}\n🛒 Покупок: {purchases}\n🎯 Скидка: {discount}%\n💰 Баланс: {balance}$",
-            'select_city': 'Выберите город:',
-            'select_category': 'Выберите категорию:',
-            'select_district': 'Выберите район:',
-            'select_delivery': 'Выберите тип доставки:',
-            'order_summary': "Информация о заказе:\n📦 Товар: {product}\n💵 Стоимость: {price}$\n🏙 Район: {district}\n🚚 Тип доставки: {delivery_type}\n\nВсё верно?",
-            'select_crypto': 'Выберите криптовалюту для оплаты:',
-            'payment_instructions': "Оплатите {amount} {currency} на адрес:\n`{payment_address}`\n\nОтсканируйте QR-код для оплаты:\nПосле подтверждения 3 сетевых подтверждений товар будет выслан автоматически.",
-            'payment_timeout': 'Время оплата истекло. Заказ отменен.',
-            'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
-            'balance': 'Ваш баланс: {balance}$',
-            'balance_add': 'Введите сумму для пополнения баланса в $:',
-            'balance_add_success': 'Баланс пополнен на {amount}$. Текущий баланс: {balance}$',
-            'support': 'По всем вопросам обращайтесь к @support_username',
-            'bonuses': 'Бонусная система:\n- За каждую 5-ю покупку скидка 10%\n- Пригласи друга и получи 50$ на баланс',
-            'rules': 'Правила:\n1. Не сообщайте никому данные о заказе\n2. Оплата только в течение 60 минут\n3. При нарушении правил - бан',
-            'reviews': 'Наши отзывы: @reviews_channel',
-            'error': 'Произошла ошибка. Попробуйте позже.',
-            'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.',
-            'back': '⬅️ Назад',
-            'main_menu_button': '🏠 Главное меню',
-            'last_order': 'Информация о последнем заказе',
-            'no_orders': 'У вас еще не было заказов',
-            'main_menu_description': '''Добро пожаловать в магазин!
+    try:
+        # Всегда обновляем тексты, даже если они уже существуют
+        default_texts = {
+            'ru': {
+                'welcome': 'Добро пожаловать!',
+                'captcha': 'Для входа решите каптчу: {code}\nВведите 5 цифр:',
+                'captcha_failed': 'Неверная каптча! Попробуйте снова:',
+                'language_selected': 'Язык установлен: Русский',
+                'main_menu': "👤 Имя: {name}\n📛 Юзернейм: @{username}\n🛒 Покупок: {purchases}\n🎯 Скидка: {discount}%\n💰 Баланс: {balance}$",
+                'select_city': 'Выберите город:',
+                'select_category': 'Выберите категорию:',
+                'select_district': 'Выберите район:',
+                'select_delivery': 'Выберите тип доставки:',
+                'order_summary': "Информация о заказе:\n📦 Товар: {product}\n💵 Стоимость: {price}$\n🏙 Район: {district}\n🚚 Тип доставки: {delivery_type}\n\nВсё верно?",
+                'select_crypto': 'Выберите криптовалюту для оплаты:',
+                'payment_instructions': "Оплатите {amount} {currency} на адрес:\n`{payment_address}`\n\nОтсканируйте QR-код для оплаты:\nПосле подтверждения 3 сетевых подтверждений товар будет выслан автоматически.",
+                'payment_timeout': 'Время оплата истекло. Заказ отменен.',
+                'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
+                'balance': 'Ваш баланс: {balance}$',
+                'balance_add': 'Введите сумму для пополнения баланса в $:',
+                'balance_add_success': 'Баланс пополнен на {amount}$. Текущий баланс: {balance}$',
+                'support': 'По всем вопросам обращайтесь к @support_username',
+                'bonuses': 'Бонусная система:\n- За каждую 5-ю покупку скидка 10%\n- Пригласи друга и получи 50$ на баланс',
+                'rules': 'Правила:\n1. Не сообщайте никому данные о заказе\n2. Оплата только в течение 60 минут\n3. При нарушении правил - бан',
+                'reviews': 'Наши отзывы: @reviews_channel',
+                'error': 'Произошла ошибка. Попробуйте позже.',
+                'ban_message': 'Вы забанены на 24 часа из-за 3 неудачных попыток оплаты.',
+                'back': '⬅️ Назад',
+                'main_menu_button': '🏠 Главное меню',
+                'last_order': 'Информация о последнем заказе',
+                'no_orders': 'У вас еще не было заказов',
+                'main_menu_description': '''Добро пожаловать в магазин!
 
 Это телеграмм бот для быстрых покупок. 🛒 Так же есть официальный магазин Mega, нажимайте перейти и выбирайте среди огромного ассортимента! 🪏
 
 ❗️ Мы соблюдаем полную конфиденциальность наших клиентов. Мусора бляди! 🤙🏼💪''',
-            'balance_instructions': '''Ваш баланс: {balance}$
+                'balance_instructions': '''Ваш баланс: {balance}$
 
 Инструкция по пополнению баланса:
 Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
 English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ქартули: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
-            'balance_topup_info': '''💳 Пополнение баланса
+                'balance_topup_info': '''💳 Пополнение баланса
 
 ❗️ Важная информация:
 • Минимальная сумма пополнения: $1
 • Адрес кошелька резервируется на 30 минут
 • Все пополнения на этот адрес будут зачислены на ваш баланс
 • После истечения времени адрес освобождается''',
-            'active_invoice': '''💳 Активный инвойс
+                'active_invoice': '''💳 Активный инвойс
 
 📝 Адрес для оплаты: `{crypto_address}`
 💎 Сумма к оплате: {crypto_amount} LTC
@@ -243,58 +251,58 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • После 3 подтверждений сети товар будет отправлен
 • При отмене или истечении времени - +1 неудачная попытка
 • 3 неудачные попытки - бан на 24 часа''',
-            'invoice_time_left': '⏱ До отмены инвойса осталось: {time_left}',
-            'invoice_cancelled': '❌ Инвойс отменен. Неудачных попыток: {failed_count}/3',
-            'invoice_expired': '⏰ Время инвойса истекло. Неудачных попыток: {failed_count}/3',
-            'almost_banned': '⚠️ Внимание! После еще {remaining} неудачных попыток вы будете забанены на 24 часа!'
-        },
-        'en': {
-            'welcome': 'Welcome!',
-            'captcha': 'To enter, solve the captcha: {code}\nEnter 5 digits:',
-            'captcha_failed': 'Invalid captcha! Try again:',
-            'language_selected': 'Language set: English',
-            'main_menu': "👤 Name: {name}\n📛 Username: @{username}\n🛒 Purchases: {purchases}\n🎯 Discount: {discount}%\n💰 Balance: {balance}$",
-            'select_city': 'Select city:',
-            'select_category': 'Select category:',
-            'select_district': 'Select district:',
-            'select_delivery': 'Select delivery type:',
-            'order_summary': "Order information:\n📦 Product: {product}\n💵 Price: {price}$\n🏙 District: {district}\n🚚 Delivery type: {delivery_type}\n\nIs everything correct?",
-            'select_crypto': 'Select cryptocurrency for payment:',
-            'payment_instructions': "Pay {amount} {currency} to address:\n`{payment_address}`\n\nOr scan QR-code:\nAfter 3 network confirmations, the product will be sent automatically.",
-            'payment_timeout': 'Payment time has expired. Order canceled.',
-            'payment_success': 'Payment received! Your product:\n\n{product_image}',
-            'balance': 'Your balance: {balance}$',
-            'balance_add': 'Enter the amount to top up your balance in $:',
-            'balance_add_success': 'Balance topped up by {amount}$. Current balance: {balance}$',
-            'support': 'For all questions contact @support_username',
-            'bonuses': 'Bonus system:\n- 10% discount for every 5th purchase\n- Invite a friend and get 50$ on your balance',
-            'rules': 'Rules:\n1. Do not share order information with anyone\n2. Payment only within 60 minutes\n3. Ban for breaking the rules',
-            'reviews': 'Our reviews: @reviews_channel',
-            'error': 'An error occurred. Please try again later.',
-            'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.',
-            'back': '⬅️ Back',
-            'main_menu_button': '🏠 Main Menu',
-            'last_order': 'Information about last order',
-            'no_orders': 'You have no orders yet',
-            'main_menu_description': '''Welcome to the store!
+                'invoice_time_left': '⏱ До отмены инвойса осталось: {time_left}',
+                'invoice_cancelled': '❌ Инвойс отменен. Неудачных попыток: {failed_count}/3',
+                'invoice_expired': '⏰ Время инвойса истекло. Неудачных попыток: {failed_count}/3',
+                'almost_banned': '⚠️ Внимание! После еще {remaining} неудачных попыток вы будете забанены на 24 часа!'
+            },
+            'en': {
+                'welcome': 'Welcome!',
+                'captcha': 'To enter, solve the captcha: {code}\nEnter 5 digits:',
+                'captcha_failed': 'Invalid captcha! Try again:',
+                'language_selected': 'Language set: English',
+                'main_menu': "👤 Name: {name}\n📛 Username: @{username}\n🛒 Purchases: {purchases}\n🎯 Discount: {discount}%\n💰 Balance: {balance}$",
+                'select_city': 'Select city:',
+                'select_category': 'Select category:',
+                'select_district': 'Select district:',
+                'select_delivery': 'Select delivery type:',
+                'order_summary': "Order information:\n📦 Product: {product}\n💵 Price: {price}$\n🏙 District: {district}\n🚚 Delivery type: {delivery_type}\n\nIs everything correct?",
+                'select_crypto': 'Select cryptocurrency for payment:',
+                'payment_instructions': "Pay {amount} {currency} to address:\n`{payment_address}`\n\nOr scan QR-code:\nAfter 3 network confirmations, the product will be sent automatically.",
+                'payment_timeout': 'Payment time has expired. Order canceled.',
+                'payment_success': 'Payment received! Your product:\n\n{product_image}',
+                'balance': 'Your balance: {balance}$',
+                'balance_add': 'Enter the amount to top up your balance in $:',
+                'balance_add_success': 'Balance topped up by {amount}$. Current balance: {balance}$',
+                'support': 'For all questions contact @support_username',
+                'bonuses': 'Bonus system:\n- 10% discount for every 5th purchase\n- Invite a friend and get 50$ on your balance',
+                'rules': 'Rules:\n1. Do not share order information with anyone\n2. Payment only within 60 minutes\n3. Ban for breaking the rules',
+                'reviews': 'Our reviews: @reviews_channel',
+                'error': 'An error occurred. Please try again later.',
+                'ban_message': 'You are banned for 24 hours due to 3 failed payment attempts.',
+                'back': '⬅️ Back',
+                'main_menu_button': '🏠 Main Menu',
+                'last_order': 'Information about last order',
+                'no_orders': 'You have no orders yet',
+                'main_menu_description': '''Welcome to the store!
 
 This is a telegram bot for quick purchases. 🛒 There is also an official Mega store, click go and choose from a huge assortment! 🪏
 
 ❗️ We maintain complete confidentiality of our customers. Pig cops! 🤙🏼💪''',
-            'balance_instructions': '''Your balance: {balance}$
+                'balance_instructions': '''Your balance: {balance}$
 
 Balance top-up instructions:
 Russian: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
 English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
-            'balance_topup_info': '''💳 Balance top-up
+                'balance_topup_info': '''💳 Balance top-up
 
 ❗️ Important information:
 • Minimum top-up amount: $1
 • Wallet address is reserved for 30 minutes
 • All top-ups to this address will be credited to your balance
 • After the time expires, the address is released''',
-            'active_invoice': '''💳 Active Invoice
+                'active_invoice': '''💳 Active Invoice
 
 📝 Payment address: `{crypto_address}`
 💎 Amount to pay: {crypto_amount} LTC
@@ -308,58 +316,58 @@ Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბა�
 • After 3 network confirmations the product will be sent
 • On cancellation or timeout - +1 failed attempt
 • 3 failed attempts - 24 hour ban''',
-            'invoice_time_left': '⏱ Time until invoice cancellation: {time_left}',
-            'invoice_cancelled': '❌ Invoice cancelled. Failed attempts: {failed_count}/3',
-            'invoice_expired': '⏰ Invoice expired. Failed attempts: {failed_count}/3',
-            'almost_banned': '⚠️ Warning! After {remaining} more failed attempts you will be banned for 24 hours!'
-        },
-        'ka': {
-            'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
-            'captcha': 'შესასვლელად გადაწყვიტეთ captcha: {code}\nშეიყვანეთ 5 ციფრი:',
-            'captcha_failed': 'არასწორი captcha! სცადეთ თავიდან:',
-            'language_selected': 'ენა დაყენებულია: ქართული',
-            'main_menu': "👤 სახელი: {name}\n📛 მომხმარებლის სახელი: @{username}\n🛒 ყიდვები: {purchases}\n🎯 ფასდაკლება: {discount}%\n💰 ბალანსი: {balance}$",
-            'select_city': 'აირჩიეთ ქალაქი:',
-            'select_category': 'აირჩიეთ კატეგორია:',
-            'select_district': 'აირჩიეთ რაიონი:',
-            'select_delivery': 'აირჩიეთ მიწოდების ტიპი:',
-            'order_summary': "შეკვეთის ინფორმაცია:\n📦 პროდუქტი: {product}\n💵 ფასი: {price}$\n🏙 რაიონი: {district}\n🚚 მიწოდების ტიპი: {delivery_type}\n\nყველაფერი სწორია?",
-            'select_crypto': 'აირჩიეთ კრიპტოვალუტა გადასახდელად:',
-            'payment_instructions': "გადაიხადეთ {amount} {currency} მისამართზე:\n`{payment_address}`\n\nან სკანირება QR-კოდი:\n3 ქსელური დადასტურების შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად.",
-            'payment_timeout': 'გადახდის დრო ამოიწურა. შეკვეთა გაუქმებულია.',
-            'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
-            'balance': 'თქვენი ბალანსი: {balance}$',
-            'balance_add': 'შეიყვანეთ ბალანსის შევსების რაოდენობა $:',
-            'balance_add_success': 'ბალანსი შეივსო {amount}$-ით. მიმდინარე ბალანსი: {balance}$',
-            'support': 'ყველა კითხვისთვის დაუკავშირდით @support_username',
-            'bonuses': 'ბონუს სისტემა:\n- ყოველ მე-5 ყიდვაზე 10% ფასდაკლება\n- მოიწვიე მეგობარი და მიიღე 50$ ბალანსზე',
-            'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 60 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
-            'reviews': 'ჩვენი მიმოხილვები: @reviews_channel',
-            'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
-            'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.',
-            'back': '⬅️ უკან',
-            'main_menu_button': '🏠 მთავარი მენიუ',
-            'last_order': 'ბოლო შეკვეთის ინფორმაცია',
-            'no_orders': 'ჯერ არ გაქვთ შეკვეთები',
-            'main_menu_description': '''მაღაზიაში მოგესალმებით!
+                'invoice_time_left': '⏱ Time until invoice cancellation: {time_left}',
+                'invoice_cancelled': '❌ Invoice cancelled. Failed attempts: {failed_count}/3',
+                'invoice_expired': '⏰ Invoice expired. Failed attempts: {failed_count}/3',
+                'almost_banned': '⚠️ Warning! After {remaining} more failed attempts you will be banned for 24 hours!'
+            },
+            'ka': {
+                'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
+                'captcha': 'შესასვლელად გადაწყვიტეთ captcha: {code}\nშეიყვანეთ 5 ციფრი:',
+                'captcha_failed': 'არასწორი captcha! სცადეთ თავიდან:',
+                'language_selected': 'ენა დაყენებულია: ქართული',
+                'main_menu': "👤 სახელი: {name}\n📛 მომხმარებლის სახელი: @{username}\n🛒 ყიდვები: {purchases}\n🎯 ფასდაკლება: {discount}%\n💰 ბალანსი: {balance}$",
+                'select_city': 'აირჩიეთ ქალაქი:',
+                'select_category': 'აირჩიეთ კატეგორია:',
+                'select_district': 'აირჩიეთ რაიონი:',
+                'select_delivery': 'აირჩიეთ მიწოდების ტიპი:',
+                'order_summary': "შეკვეთის ინფორმაცია:\n📦 პროდუქტი: {product}\n💵 ფასი: {price}$\n🏙 რაიონი: {district}\n🚚 მიწოდების ტიპი: {delivery_type}\n\nყველაფერი სწორია?",
+                'select_crypto': 'აირჩიეთ კრიპტოვალუტა გადასახდელად:',
+                'payment_instructions': "გადაიხადეთ {amount} {currency} მისამართზე:\n`{payment_address}`\n\nან სკანირება QR-კოდი:\n3 ქსელური დადასტურების შემდეგ პროდუქტი გამოგეგზავნებათ ავტომატურად.",
+                'payment_timeout': 'გადახდის დრო ამოიწურა. შეკვეთა გაუქმებულია.',
+                'payment_success': 'გადახდა მიღებულია! თქვენი პროდუქტი:\n\n{product_image}',
+                'balance': 'თქვენი ბალანსი: {balance}$',
+                'balance_add': 'შეიყვანეთ ბალანსის შევსების რაოდენობა $:',
+                'balance_add_success': 'ბალანსი შეივსო {amount}$-ით. მიმდინარე ბალანსი: {balance}$',
+                'support': 'ყველა კითხვისთვის დაუკავშირდით @support_username',
+                'bonuses': 'ბონუს სისტემა:\n- ყოველ მე-5 ყიდვაზე 10% ფასდაკლება\n- მოიწვიე მეგობარი და მიიღე 50$ ბალანსზე',
+                'rules': 'წესები:\n1. არავის არ შეახოთ შეკვეთის ინფორმაცია\n2. გადახდა მხოლოდ 60 წუთის განმავლობაში\n3. წესების დარღვევაზე - ბანი',
+                'reviews': 'ჩვენი მიმოხილვები: @reviews_channel',
+                'error': 'მოხდა შეცდომა. სცადეთ მოგვიანებით.',
+                'ban_message': '3 წარუმატებელი გადახდის მცდელობის გამო თქვენ დაბლოკილი ხართ 24 საათის განმავლობაში.',
+                'back': '⬅️ უკან',
+                'main_menu_button': '🏠 მთავარი მენიუ',
+                'last_order': 'ბოლო შეკვეთის ინფორმაცია',
+                'no_orders': 'ჯერ არ გაქვთ შეკვეთები',
+                'main_menu_description': '''მაღაზიაში მოგესალმებით!
 
 ეს არის ტელეგრამ ბოტი სწრაფი შესყიდვებისთვის. 🛒 ასევე არის ოფიციალური Mega მაღაზია, დააჭირეთ გადასვლას და აირჩიეთ უზარმაზარი ასორტიმენტიდან! 🪏
 
 ❗️ ჩვენ ვიცავთ ჩვენი კლიენტების სრულ კონფიდენციალურობას. ღორის პოლიციელები! 🤙🏼💪''',
-            'balance_instructions': '''თქვენი ბალანსი: {balance}$
+                'balance_instructions': '''თქვენი ბალანსი: {balance}$
 
 ბალანსის შევსების ინსტრუქცია:
 Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
 English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ქართული: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
-            'balance_topup_info': '''💳 ბალანსის შევსება
+                'balance_topup_info': '''💳 ბალანსის შევსება
 
 ❗️ მნიშვნელოვანი ინფორმაცია:
 • მინიმალური შევსების რაოდენობა: $1
 • საფულის მისამართი იყიდება 30 წუთის განმავლობაში
 • ყველა შევსება ამ მისამართზე ჩაირიცხება თქვენს ბალანსზე
 • დროის ამოწურვის შემდეგ მისამართი გათავისუფლდება''',
-            'active_invoice': '''💳 აქტიური ინვოისი
+                'active_invoice': '''💳 აქტიური ინვოისი
 
 📝 გადახდის მისამართი: `{crypto_address}`
 💎 გადასახდელი რაოდენობა: {crypto_amount} LTC
@@ -373,104 +381,110 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
-            'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
-            'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
-            'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
-            'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!'
+                'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
+                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუ�მატებელი მცდელობები: {failed_count}/3',
+                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
+                'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!'
+            }
         }
-    }
-    
-    for lang, translations in default_texts.items():
-        for key, value in translations.items():
-            await conn.execute('''
-            INSERT INTO texts (lang, key, value)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (lang, key) DO UPDATE SET value = EXCLUDED.value
-            ''', lang, key, value)
-    
-    # Проверяем и добавляем города
-    cities_count = await conn.fetchval('SELECT COUNT(*) FROM cities')
-    if cities_count == 0:
-        cities = ['Тбилиси', 'Гори', 'Кутаиси', 'Батуми']
-        for city in cities:
-            city_id = await conn.fetchval('''
-            INSERT INTO cities (name) VALUES ($1) 
-            ON CONFLICT (name) DO NOTHING
-            RETURNING id
-            ''', city)
-            
-            # Добавляем районы для каждого города
-            if city == 'Тбилиси':
-                districts = ['Церетели', 'Центр', 'Сабуртало']
-            else:
-                districts = ['Центр', 'Западный', 'Восточный']
-                
-            for district in districts:
+        
+        for lang, translations in default_texts.items():
+            for key, value in translations.items():
                 await conn.execute('''
-                INSERT INTO districts (city_id, name)
-                VALUES ($1, $2)
-                ON CONFLICT (city_id, name) DO NOTHING
-                ''', city_id, district)
-            
-            # Добавляем категории товаров
-            categories = ['Мефедрон', 'Амфетамин', 'Кокаин', 'Гашиш']
-            for category in categories:
-                await conn.execute('''
-                INSERT INTO categories (name) VALUES ($1)
+                INSERT INTO texts (lang, key, value)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (lang, key) DO UPDATE SET value = EXCLUDED.value
+                ''', lang, key, value)
+        
+        # Проверяем и добавляем города
+        cities_count = await conn.fetchval('SELECT COUNT(*) FROM cities')
+        if cities_count == 0:
+            cities = ['Тбилиси', 'Гори', 'Кутаиси', 'Батуми']
+            for city in cities:
+                city_id = await conn.fetchval('''
+                INSERT INTO cities (name) VALUES ($1) 
                 ON CONFLICT (name) DO NOTHING
-                ''', category)
-            
-            # Добавляем типы доставки
-            delivery_types = ['Подъезд', 'Прикоп', 'Магнит', 'Во дворах']
-            for delivery_type in delivery_types:
-                await conn.execute('''
-                INSERT INTO delivery_types (name) VALUES ($1)
-                ON CONFLICT (name) DO NOTHING
-                ''', delivery_type)
-            
-            # Добавляем товары для каждого города
-            if city == 'Тбилиси':
-                products = [
-                    ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
-                    ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
-                    ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
-                    ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 'Амфетамин', 'Центр', 'Подъезд')
-                ]
-            else:
-                products = [
-                    ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
-                    ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд')
-                ]
+                RETURNING id
+                ''', city)
                 
-            # Получаем ID категорий, районов и типов доставки
-            categories_dict = {}
-            categories_rows = await conn.fetch('SELECT * FROM categories')
-            for row in categories_rows:
-                categories_dict[row['name']] = row['id']
-                
-            districts_dict = {}
-            districts_rows = await conn.fetch('SELECT * FROM districts WHERE city_id = $1', city_id)
-            for row in districts_rows:
-                districts_dict[row['name']] = row['id']
-                
-            delivery_types_dict = {}
-            delivery_types_rows = await conn.fetch('SELECT * FROM delivery_types')
-            for row in delivery_types_rows:
-                delivery_types_dict[row['name']] = row['id']
-                
-            # Добавляем товары
-            for product_name, description, price, image_url, category_name, district_name, delivery_type_name in products:
-                category_id = categories_dict.get(category_name)
-                district_id = districts_dict.get(district_name)
-                delivery_type_id = delivery_types_dict.get(delivery_type_name)
-                
-                if category_id and district_id and delivery_type_id:
-                    product_uuid = str(uuid.uuid4())
+                # Добавляем районы для каждого города
+                if city == 'Тбилиси':
+                    districts = ['Церетели', 'Центр', 'Сабуртало']
+                else:
+                    districts = ['Центр', 'Западный', 'Восточный']
+                    
+                for district in districts:
                     await conn.execute('''
-                    INSERT INTO products (uuid, name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    ON CONFLICT (uuid) DO NOTHING
-                    ''', product_uuid, product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
+                    INSERT INTO districts (city_id, name)
+                    VALUES ($1, $2)
+                    ON CONFLICT (city_id, name) DO NOTHING
+                    ''', city_id, district)
+                
+                # Добавляем категории товаров
+                categories = ['Мефедрон', 'Амфетамин', 'Кокаин', 'Гашиш']
+                for category in categories:
+                    await conn.execute('''
+                    INSERT INTO categories (name) VALUES ($1)
+                    ON CONFLICT (name) DO NOTHING
+                    ''', category)
+                
+                # Добавляем типы доставки
+                delivery_types = ['Подъезд', 'Прикоп', 'Магнит', 'Во дворах']
+                for delivery_type in delivery_types:
+                    await conn.execute('''
+                    INSERT INTO delivery_types (name) VALUES ($1)
+                    ON CONFLICT (name) DO NOTHING
+                    ''', delivery_type)
+                
+                # Добавляем товары для каждого города
+                if city == 'Тбилиси':
+                    products = [
+                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
+                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
+                        ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
+                        ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 'Амфетамин', 'Центр', 'Подъезд')
+                    ]
+                else:
+                    products = [
+                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
+                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд')
+                    ]
+                    
+                # Получаем ID категорий, районов и типов доставки
+                categories_dict = {}
+                categories_rows = await conn.fetch('SELECT * FROM categories')
+                for row in categories_rows:
+                    categories_dict[row['name']] = row['id']
+                    
+                districts_dict = {}
+                districts_rows = await conn.fetch('SELECT * FROM districts WHERE city_id = $1', city_id)
+                for row in districts_rows:
+                    districts_dict[row['name']] = row['id']
+                    
+                delivery_types_dict = {}
+                delivery_types_rows = await conn.fetch('SELECT * FROM delivery_types')
+                for row in delivery_types_rows:
+                    delivery_types_dict[row['name']] = row['id']
+                    
+                # Добавляем товары
+                for product_name, description, price, image_url, category_name, district_name, delivery_type_name in products:
+                    category_id = categories_dict.get(category_name)
+                    district_id = districts_dict.get(district_name)
+                    delivery_type_id = delivery_types_dict.get(delivery_type_name)
+                    
+                    if category_id and district_id and delivery_type_id:
+                        product_uuid = str(uuid.uuid4())
+                        await conn.execute('''
+                        INSERT INTO products (uuid, name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        ON CONFLICT (uuid) DO NOTHING
+                        ''', product_uuid, product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
+        
+        logger.info("Default data initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing default data: {e}")
+        logger.error(traceback.format_exc())
+        raise
 
 # Функция для загрузки данных в кэш
 async def load_cache():
@@ -524,113 +538,153 @@ async def load_cache():
         logger.info("Кэш успешно загружен")
     except Exception as e:
         logger.error(f"Ошибка загрузки кэша: {e}")
+        logger.error(traceback.format_exc())
         raise
 
 # Функция для получения текста
 def get_text(lang, key, **kwargs):
-    if lang not in texts_cache:
-        logger.warning(f"Language {lang} not found in cache, using 'ru'")
-        lang = 'ru'
-    if key not in texts_cache[lang]:
-        logger.warning(f"Text key {key} not found for language {lang}. Available keys: {list(texts_cache[lang].keys())}")
-        return f"Текст не найден: {key}"
-    
-    text = texts_cache[lang][key]
     try:
-        if kwargs:
-            text = text.format(**kwargs)
-        return text
-    except KeyError as e:
-        logger.error(f"Ошибка форматирования текста: {e}, ключ: {key}, аргументы: {kwargs}")
-        return text
+        if lang not in texts_cache:
+            logger.warning(f"Language {lang} not found in cache, using 'ru'")
+            lang = 'ru'
+        if key not in texts_cache[lang]:
+            logger.warning(f"Text key {key} not found for language {lang}. Available keys: {list(texts_cache[lang].keys())}")
+            return f"Текст не найден: {key}"
+        
+        text = texts_cache[lang][key]
+        try:
+            if kwargs:
+                text = text.format(**kwargs)
+            return text
+        except KeyError as e:
+            logger.error(f"Ошибка форматирования текста: {e}, ключ: {key}, аргументы: {kwargs}")
+            return text
+    except Exception as e:
+        logger.error(f"Error in get_text: {e}")
+        return "Ошибка загрузки текста"
 
 # Функции для работы с базой данных
 async def get_user(user_id):
-    async with db_pool.acquire() as conn:
-        return await conn.fetchrow('SELECT * FROM users WHERE user_id = $1', user_id)
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchrow('SELECT * FROM users WHERE user_id = $1', user_id)
+    except Exception as e:
+        logger.error(f"Error getting user {user_id}: {e}")
+        return None
 
 async def update_user(user_id, **kwargs):
-    # Фильтруем только разрешенные колонки
-    valid_updates = {k: v for k, v in kwargs.items() if k in ALLOWED_USER_COLUMNS}
-    if not valid_updates:
-        return
+    try:
+        # Фильтруем только разрешенные колонки
+        valid_updates = {k: v for k, v in kwargs.items() if k in ALLOWED_USER_COLUMNS}
+        if not valid_updates:
+            return
+            
+        # Формируем SET часть запроса с правильной нумерацией параметров
+        set_parts = []
+        values = []
+        for i, (k, v) in enumerate(valid_updates.items(), start=1):
+            set_parts.append(f"{k} = ${i}")
+            values.append(v)
         
-    # Формируем SET часть запроса с правильной нумерацией параметров
-    set_parts = []
-    values = []
-    for i, (k, v) in enumerate(valid_updates.items(), start=1):
-        set_parts.append(f"{k} = ${i}")
-        values.append(v)
-    
-    # Добавляем user_id в конец списка значений
-    values.append(user_id)
-    set_clause = ", ".join(set_parts)
-    
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            f'UPDATE users SET {set_clause} WHERE user_id = ${len(values)}',
-            *values
-        )
+        # Добавляем user_id в конец списка значений
+        values.append(user_id)
+        set_clause = ", ".join(set_parts)
+        
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                f'UPDATE users SET {set_clause} WHERE user_id = ${len(values)}',
+                *values
+            )
+    except Exception as e:
+        logger.error(f"Error updating user {user_id}: {e}")
 
 async def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address=None, crypto_amount=None):
-    async with db_pool.acquire() as conn:
-        await conn.execute('''
-        INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount)
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+            INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount)
+    except Exception as e:
+        logger.error(f"Error adding transaction for user {user_id}: {e}")
 
 async def add_purchase(user_id, product, price, district, delivery_type):
-    async with db_pool.acquire() as conn:
-        # Атомарное обновление счетчика покупок
-        await conn.execute('''
-        WITH new_purchase AS (
-            INSERT INTO purchases (user_id, product, price, district, delivery_type)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING user_id
-        )
-        UPDATE users 
-        SET purchase_count = purchase_count + 1 
-        WHERE user_id = $1
-        ''', user_id, product, price, district, delivery_type)
+    try:
+        async with db_pool.acquire() as conn:
+            # Атомарное обновление счетчика покупок
+            await conn.execute('''
+            WITH new_purchase AS (
+                INSERT INTO purchases (user_id, product, price, district, delivery_type)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING user_id
+            )
+            UPDATE users 
+            SET purchase_count = purchase_count + 1 
+            WHERE user_id = $1
+            ''', user_id, product, price, district, delivery_type)
+    except Exception as e:
+        logger.error(f"Error adding purchase for user {user_id}: {e}")
 
 async def get_pending_transactions():
-    async with db_pool.acquire() as conn:
-        return await conn.fetch('SELECT * FROM transactions WHERE status = $1 AND expires_at > NOW()', 'pending')
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetch('SELECT * FROM transactions WHERE status = $1 AND expires_at > NOW()', 'pending')
+    except Exception as e:
+        logger.error(f"Error getting pending transactions: {e}")
+        return []
 
 async def update_transaction_status(order_id, status):
-    async with db_pool.acquire() as conn:
-        await conn.execute('UPDATE transactions SET status = $1 WHERE order_id = $2', status, order_id)
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('UPDATE transactions SET status = $1 WHERE order_id = $2', status, order_id)
+    except Exception as e:
+        logger.error(f"Error updating transaction status for order {order_id}: {e}")
 
 async def update_transaction_status_by_uuid(invoice_uuid, status):
-    async with db_pool.acquire() as conn:
-        await conn.execute('UPDATE transactions SET status = $1 WHERE invoice_uuid = $2', status, invoice_uuid)
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('UPDATE transactions SET status = $1 WHERE invoice_uuid = $2', status, invoice_uuid)
+    except Exception as e:
+        logger.error(f"Error updating transaction status for invoice {invoice_uuid}: {e}")
 
 async def get_last_order(user_id):
-    async with db_pool.acquire() as conn:
-        return await conn.fetchrow('SELECT * FROM purchases WHERE user_id = $1 ORDER BY purchase_time DESC LIMIT 1', user_id)
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchrow('SELECT * FROM purchases WHERE user_id = $1 ORDER BY purchase_time DESC LIMIT 1', user_id)
+    except Exception as e:
+        logger.error(f"Error getting last order for user {user_id}: {e}")
+        return None
 
 # Функция для проверки бана пользователя
 async def is_banned(user_id):
-    user = await get_user(user_id)
-    if user and user['ban_until']:
-        try:
-            ban_until = user['ban_until']
-            if isinstance(ban_until, str):
-                ban_until = datetime.strptime(ban_until, '%Y-%m-%d %H:%M:%S')
-            if ban_until > datetime.now():
-                return True
-        except ValueError:
-            return False
-    return False
+    try:
+        user = await get_user(user_id)
+        if user and user['ban_until']:
+            try:
+                ban_until = user['ban_until']
+                if isinstance(ban_until, str):
+                    ban_until = datetime.strptime(ban_until, '%Y-%m-%d %H:%M:%S')
+                if ban_until > datetime.now():
+                    return True
+            except ValueError:
+                return False
+        return False
+    except Exception as e:
+        logger.error(f"Error checking ban status for user {user_id}: {e}")
+        return False
 
 # Функция для проверки активного инвойса на пополнение баланса
 async def has_active_invoice(user_id):
-    async with db_pool.acquire() as conn:
-        active_invoice = await conn.fetchrow(
-            "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW()",
-            user_id
-        )
-        return active_invoice is not None
+    try:
+        async with db_pool.acquire() as conn:
+            active_invoice = await conn.fetchrow(
+                "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW()",
+                user_id
+            )
+            return active_invoice is not None
+    except Exception as e:
+        logger.error(f"Error checking active invoice for user {user_id}: {e}")
+        return False
 
 # Функции-геттеры для доступа к актуальным кэшам
 def get_cities_cache():

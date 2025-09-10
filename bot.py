@@ -18,7 +18,8 @@ from db import (
     get_pending_transactions, update_transaction_status, update_transaction_status_by_uuid, 
     get_last_order, is_banned, get_text, 
     load_cache,
-    get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache, get_categories_cache
+    get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache, get_categories_cache,
+    has_active_invoice  # Добавлен новый импорт
 )
 from ltc_hdwallet import ltc_wallet
 
@@ -126,13 +127,55 @@ async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMCont
     builder.row(InlineKeyboardButton(text="LTC", callback_data="topup_ltc"))
     builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_balance_menu"))
     
-    image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
-    
-    await callback.message.answer_photo(
-        photo=image_url,
-        caption=topup_info,
+    await callback.message.edit_text(
+        text=topup_info,
         reply_markup=builder.as_markup()
     )
+
+# Функция для показа активного инвойса
+async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, user_id: int, lang: str):
+    async with db_pool.acquire() as conn:
+        invoice = await conn.fetchrow(
+            "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW() AND product_info LIKE 'Пополнение баланса%'",
+            user_id
+        )
+    
+    if invoice:
+        expires_str = invoice['expires_at'].strftime("%d.%m.%Y, %I:%M %p")
+        
+        payment_text = f"""💳 Пополнение баланса
+
+📝 Адрес для пополнения: `{invoice['crypto_address']}`
+
+⏱ Действительно до: {expires_str}
+
+❗️ Важно:
+• Отправьте {invoice['crypto_amount']} LTC на указанный адрес
+• Все пополнения на этот адрес будут зачислены на ваш баланс
+• После истечения времени адрес освобождается
+• Для удобства используйте QR код выше"""
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text="✅ Проверить", callback_data="check_invoice"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_invoice")
+        )
+        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+        
+        try:
+            await callback.message.answer_photo(
+                photo=invoice['payment_url'],
+                caption=payment_text,
+                reply_markup=builder.as_markup(),
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error sending invoice: {e}")
+            await callback.message.answer(
+                text=payment_text,
+                reply_markup=builder.as_markup(),
+                parse_mode='Markdown'
+            )
 
 # Обработчики команд и состояний
 @dp.message(Command("start"))
@@ -268,6 +311,12 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
     lang = user_data['language'] or 'ru'
     data = callback.data
     
+    # Проверяем есть ли активный инвойс на пополнение
+    if await has_active_invoice(user_id) and data.startswith('city_'):
+        # Показываем экран с инвойсом вместо перехода к выбору города
+        await show_active_invoice(callback, state, user_id, lang)
+        return
+    
     state_data = await state.get_data()
     if 'last_message_id' in state_data:
         await delete_previous_message(user_id, state_data['last_message_id'])
@@ -297,7 +346,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         last_order = await get_last_order(user_id)
         if last_order:
             order_text = (
-                f"📦 Т товар: {last_order['product']}\n"
+                f"📦 Товар: {last_order['product']}\n"
                 f"💵 Стоимость: {last_order['price']}$\n"
                 f"🏙 Район: {last_order['district']}\n"
                 f"🚚 Тип доставки: {last_order['delivery_type']}\n"
@@ -793,6 +842,16 @@ async def process_balance(message: types.Message, state: FSMContext):
         
         order_id = f"topup_{int(time.time())}_{user.id}"
         expires_at = datetime.now() + timedelta(minutes=30)
+        
+        # Сохраняем информацию о транзакции в состоянии
+        await state.update_data(
+            topup_invoice=order_id,
+            topup_amount=amount,
+            topup_address=address_data['address'],
+            topup_ltc_amount=amount_ltc,
+            topup_expires=expires_at
+        )
+        
         await add_transaction(
             user.id,
             amount,
@@ -806,25 +865,72 @@ async def process_balance(message: types.Message, state: FSMContext):
             str(amount_ltc)  # Конвертируем float в string
         )
         
-        payment_text = get_text(
-            lang,
-            'payment_instructions',
-            amount=round(amount_ltc, 8),
-            currency='LTC',
-            payment_address=address_data['address']
+        # Форматируем время истечения
+        expires_str = expires_at.strftime("%d.%m.%Y, %I:%M %p")
+        
+        payment_text = f"""💳 Пополнение баланса
+
+📝 Адрес для пополнения: `{address_data['address']}`
+
+⏱ Действительно до: {expires_str}
+
+❗️ Важно:
+• Отправьте {round(amount_ltc, 8)} LTC на указанный адрес
+• Все пополнения на этот адрес будут зачислены на ваш баланс
+• После истечения времени адрес освобождается
+• Для удобства используйте QR код выше"""
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text="✅ Проверить", callback_data="check_invoice"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_invoice")
         )
+        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_topup_menu"))
         
         try:
             await message.answer_photo(
                 photo=qr_code,
-                caption=payment_text
+                caption=payment_text,
+                reply_markup=builder.as_markup(),
+                parse_mode='Markdown'
             )
         except Exception as e:
             logger.error(f"Error sending QR code: {e}")
-            await message.answer(text=payment_text)
+            await message.answer(
+                text=payment_text,
+                reply_markup=builder.as_markup(),
+                parse_mode='Markdown'
+            )
             
     except ValueError:
         await message.answer(get_text(lang, 'error'))
+
+# Обработчики для кнопок инвойса
+@dp.callback_query(F.data == "check_invoice")
+async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer("Проверка оплаты... Пожалуйста, подождите")
+    # Заглушка для проверки платежа
+    await callback.message.answer("Функция проверки находится в разработке")
+
+@dp.callback_query(F.data == "cancel_invoice")
+async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user_data = await get_user(user_id)
+    lang = user_data['language'] or 'ru'
+    
+    # Обновляем статус транзакции на отмененный
+    data = await state.get_data()
+    if 'topup_invoice' in data:
+        await update_transaction_status(data['topup_invoice'], 'cancelled')
+    
+    await callback.answer("Пополнение отменено")
+    await show_balance_menu(callback, state)
+    await state.set_state(Form.balance_menu)
+
+@dp.callback_query(F.data == "back_to_topup_menu")
+async def back_to_topup_menu(callback: types.CallbackQuery, state: FSMContext):
+    await show_topup_currency_menu(callback, state)
+    await state.set_state(Form.topup_currency)
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message, state: FSMContext):

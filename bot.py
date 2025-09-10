@@ -3,6 +3,8 @@ import random
 import time
 import asyncio
 import os
+import socket
+import sys
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -11,6 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
+from aiogram.exceptions import TelegramConflictError
 import aiohttp
 
 from db import (
@@ -62,6 +65,18 @@ CRYPTO_CURRENCIES = {
     'LTC': 'Litecoin'
 }
 
+# Проверка на единственный экземпляр бота
+def singleton_check():
+    try:
+        # Пытаемся занять порт для проверки уникальности экземпляра
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_socket.bind(("127.0.0.1", 17891))
+        test_socket.close()
+        return True
+    except socket.error:
+        logger.error("Another instance of the bot is already running!")
+        return False
+
 # Функция для получения курса LTC с fallback значением
 async def get_ltc_usd_rate():
     try:
@@ -82,7 +97,21 @@ async def delete_previous_message(chat_id: int, message_id: int):
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception as e:
-        logger.error(f"Error deleting message: {e}")
+        # Игнорируем ошибку "message not found"
+        if "message to delete not found" not in str(e):
+            logger.error(f"Error deleting message: {e}")
+
+# Безопасное удаление предыдущего сообщения с очисткой состояния
+async def safe_delete_previous_message(chat_id: int, message_id: int, state: FSMContext):
+    if message_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            if "message to delete not found" not in str(e):
+                logger.error(f"Error deleting message: {e}")
+    
+    # Очищаем ID сообщения из состояния
+    await state.update_data(last_message_id=None)
 
 # Функция для уведомлений об инвойсе
 async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
@@ -90,6 +119,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
     
     if user_id in invoice_notifications:
         invoice_notifications[user_id].cancel()
+        del invoice_notifications[user_id]
     
     async def notify():
         while True:
@@ -168,7 +198,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 
                 break
     
-    # Запускаем задачу и сохраняем ссылку для отмена
+    # Запускаем задачу и сохраняем ссылку для отмены
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -384,7 +414,7 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
     
     data = await state.get_data()
     if 'last_message_id' in data:
-        await delete_previous_message(user_id, data['last_message_id'])
+        await safe_delete_previous_message(user_id, data['last_message_id'], state)
     
     sent_message = await message.answer_photo(
         photo=image_url,
@@ -417,7 +447,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
     
     state_data = await state.get_data()
     if 'last_message_id' in state_data:
-        await delete_previous_message(user_id, state_data['last_message_id'])
+        await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
     
     if data.startswith('city_'):
         city = data.replace('city_', '')
@@ -543,7 +573,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
     
     state_data = await state.get_data()
     if 'last_message_id' in state_data:
-        await delete_previous_message(user_id, state_data['last_message_id'])
+        await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
     
     if data == 'back_to_main':
         await show_main_menu(callback.message, state, user_id, lang)
@@ -603,7 +633,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
     
     state_data = await state.get_data()
     if 'last_message_id' in state_data:
-        await delete_previous_message(user_id, state_data['last_message_id'])
+        await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
     
     if data == 'back_to_city':
         city_data = await state.get_data()
@@ -690,7 +720,7 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
     
     state_data = await state.get_data()
     if 'last_message_id' in state_data:
-        await delete_previous_message(user_id, state_data['last_message_id'])
+        await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
     
     if data == 'back_to_district':
         city_data = await state.get_data()
@@ -765,7 +795,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
     
     state_data = await state.get_data()
     if 'last_message_id' in state_data:
-        await delete_previous_message(user_id, state_data['last_message_id'])
+        await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
     
     if data == 'back_to_delivery':
         # Получаем актуальные кэши
@@ -810,7 +840,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
     
     state_data = await state.get_data()
     if 'last_message_id' in state_data:
-        await delete_previous_message(user_id, state_data['last_message_id'])
+        await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
     
     if data == 'back_to_confirmation':
         state_data = await state.get_data()
@@ -855,7 +885,8 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         
         # Создаем заказ с LTC
         order_id = f"order_{int(time.time())}_{user_id}"
-                # Получаем текущий курс LTC (теперь всегда возвращает число)
+        
+        # Получаем текущий курс LTC (теперь всегда возвращает число)
         ltc_rate = await get_ltc_usd_rate()
         
         # Конвертируем USD в LTC
@@ -1085,22 +1116,43 @@ async def handle_text(message: types.Message, state: FSMContext):
         await state.set_state(Form.main_menu)
 
 async def main():
+    # Проверка на единственный экземпляр
+    if not singleton_check():
+        logger.error("Another instance is already running. Exiting.")
+        return
+    
     global db_pool
     
-    # Удаляем вебхук перед запуском поллинга
-    await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Инициализируем базу данных
-    db_pool = await init_db(DATABASE_URL)
-    
-    # Принудительно загружаем кэш после инициализации БД
-    await load_cache()
-    
-    # Запускаем проверку pending транзакций в фоне
-    asyncio.create_task(check_pending_transactions_loop())
-    
-    # Запускаем бота
-    await dp.start_polling(bot)
+    try:
+        # Удаляем вебхук перед запуском поллинга
+        await bot.delete_webhook(drop_pending_updates=True)
+        await asyncio.sleep(1)
+        
+        # Инициализируем базу данных
+        db_pool = await init_db(DATABASE_URL)
+        
+        # Принудительно загружаем кэш после инициализации БД
+        await load_cache()
+        
+        # Запускаем проверку pending транзакций в фоне
+        asyncio.create_task(check_pending_transactions_loop())
+        
+        # Запускаем бота с обработкой ошибок
+        while True:
+            try:
+                await dp.start_polling(bot)
+            except TelegramConflictError:
+                logger.error("Bot conflict detected. Waiting 10 seconds before restart...")
+                await asyncio.sleep(10)
+            except Exception as e:
+                logger.error(f"Unexpected error: {e}. Restarting in 5 seconds...")
+                await asyncio.sleep(5)
+                
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+    finally:
+        if db_pool:
+            await db_pool.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

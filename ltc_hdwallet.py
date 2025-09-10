@@ -1,7 +1,7 @@
 import os
 from hdwallet import HDWallet
 from hdwallet.symbols import LTC
-from hdwallet.utils import generate_mnemonic
+from hdwallet.utils import Mnemonic
 from typing import Dict, Any
 import logging
 
@@ -11,7 +11,8 @@ class LTCWallet:
     def __init__(self):
         self.mnemonic = os.getenv("LTC_MNEMONIC")
         if not self.mnemonic:
-            self.mnemonic = generate_mnemonic(language="english", strength=256)
+            # Генерация новой мнемонической фразы
+            self.mnemonic = Mnemonic(language="english").generate()
             logger.warning(f"Generated new mnemonic: {self.mnemonic}")
             # В продакшене нужно сохранить этот мнемоник в безопасное место
         

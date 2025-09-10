@@ -19,7 +19,7 @@ from db import (
     get_last_order, is_banned, get_text, 
     load_cache,
     get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache, get_categories_cache,
-    has_active_invoice  # Добавлен новый импорт
+    has_active_invoice
 )
 from ltc_hdwallet import ltc_wallet
 
@@ -55,6 +55,7 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 db_pool = None
+invoice_notifications = {}
 
 # Доступные криптовалюты (только LTC)
 CRYPTO_CURRENCIES = {
@@ -83,17 +84,93 @@ async def delete_previous_message(chat_id: int, message_id: int):
     except Exception as e:
         logger.error(f"Error deleting message: {e}")
 
-# Поток для проверки pending транзакций
-async def check_pending_transactions_loop():
-    while True:
-        try:
-            # В реальной реализации здесь нужно подключиться к LTC node
-            # или использовать explorer API для проверки баланса
-            # Это сложная задача, требующая отдельной реализации
-            await asyncio.sleep(300)  # Проверяем каждые 5 минут
-        except Exception as e:
-            logger.error(f"Error in check_pending_transactions: {e}")
-            await asyncio.sleep(300)
+# Функция для уведомлений об инвойсе
+async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
+    global invoice_notifications
+    
+    if user_id in invoice_notifications:
+        invoice_notifications[user_id].cancel()
+    
+    async def notify():
+        while True:
+            async with db_pool.acquire() as conn:
+                invoice = await conn.fetchrow(
+                    "SELECT * FROM transactions WHERE order_id = $1 AND status = 'pending'",
+                    order_id
+                )
+                
+                if not invoice or invoice['expires_at'] <= datetime.now():
+                    break
+                
+                time_left = invoice['expires_at'] - datetime.now()
+                minutes_left = int(time_left.total_seconds() // 60)
+                
+                # Отправляем уведомление каждые 5 минут
+                if minutes_left % 5 == 0 and minutes_left > 0:
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            get_text(lang, 'invoice_time_left', time_left=f"{minutes_left} минут")
+                        )
+                    except Exception as e:
+                        logger.error(f"Error sending notification: {e}")
+                
+                # Проверяем каждую минуту
+                await asyncio.sleep(60)
+            
+            # После истечения времени
+            if invoice and invoice['expires_at'] <= datetime.now():
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE transactions SET status = 'expired' WHERE order_id = $1",
+                        order_id
+                    )
+                    
+                    # Увеличиваем счетчик неудачных попыток
+                    user = await conn.fetchrow(
+                        "SELECT * FROM users WHERE user_id = $1", user_id
+                    )
+                    new_failed = (user['failed_payments'] or 0) + 1
+                    await conn.execute(
+                        "UPDATE users SET failed_payments = $1 WHERE user_id = $2",
+                        new_failed, user_id
+                    )
+                    
+                    # Проверяем на бан
+                    if new_failed >= 3:
+                        ban_until = datetime.now() + timedelta(hours=24)
+                        await conn.execute(
+                            "UPDATE users SET ban_until = $1 WHERE user_id = $2",
+                            ban_until, user_id
+                        )
+                
+                try:
+                    user_data = await get_user(user_id)
+                    lang = user_data['language'] or 'ru'
+                    
+                    await bot.send_message(
+                        user_id,
+                        get_text(lang, 'invoice_expired', failed_count=new_failed)
+                    )
+                    
+                    if new_failed == 2:
+                        await bot.send_message(
+                            user_id,
+                            get_text(lang, 'almost_banned', remaining=1)
+                        )
+                    elif new_failed >= 3:
+                        await bot.send_message(
+                            user_id,
+                            get_text(lang, 'ban_message')
+                        )
+                except Exception as e:
+                    logger.error(f"Error sending expiration message: {e}")
+                
+                break
+    
+    # Запускаем задачу и сохраняем ссылку для отмена
+    task = asyncio.create_task(notify())
+    invoice_notifications[user_id] = task
 
 # Функция для показа меню баланса
 async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
@@ -136,31 +213,34 @@ async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMCont
 async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, user_id: int, lang: str):
     async with db_pool.acquire() as conn:
         invoice = await conn.fetchrow(
-            "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW() AND product_info LIKE 'Пополнение баланса%'",
+            "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW()",
             user_id
         )
     
     if invoice:
-        expires_str = invoice['expires_at'].strftime("%d.%m.%Y, %I:%M %p")
+        expires_time = invoice['expires_at'].strftime("%d.%m.%Y, %H:%M:%S")
+        time_left = invoice['expires_at'] - datetime.now()
+        time_left_str = f"{int(time_left.total_seconds() // 60)} мин {int(time_left.total_seconds() % 60)} сек"
         
-        payment_text = f"""💳 Пополнение баланса
-
-📝 Адрес для пополнения: `{invoice['crypto_address']}`
-
-⏱ Действительно до: {expires_str}
-
-❗️ Важно:
-• Отправьте {invoice['crypto_amount']} LTC на указанный адрес
-• Все пополнения на этот адрес будут зачислены на ваш баланс
-• После истечения времени адрес освобождается
-• Для удобства используйте QR код выше"""
+        payment_text = get_text(
+            lang, 
+            'active_invoice',
+            crypto_address=invoice['crypto_address'],
+            crypto_amount=invoice['crypto_amount'],
+            amount=invoice['amount'],
+            expires_time=expires_time,
+            time_left=time_left_str
+        )
         
         builder = InlineKeyboardBuilder()
         builder.row(
-            InlineKeyboardButton(text="✅ Проверить", callback_data="check_invoice"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_invoice")
+            InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_invoice"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_invoice")
         )
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+        
+        # Запускаем таймер уведомлений для этого инвойса
+        asyncio.create_task(invoice_notification_loop(user_id, invoice['order_id'], lang))
         
         try:
             await callback.message.answer_photo(
@@ -176,6 +256,18 @@ async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, 
                 reply_markup=builder.as_markup(),
                 parse_mode='Markdown'
             )
+
+# Поток для проверки pending транзакций
+async def check_pending_transactions_loop():
+    while True:
+        try:
+            # В реальной реализации здесь нужно подключиться к LTC node
+            # или использовать explorer API для проверки баланса
+            # Это сложная задача, требующая отдельной реализации
+            await asyncio.sleep(300)  # Проверяем каждые 5 минут
+        except Exception as e:
+            logger.error(f"Error in check_pending_transactions: {e}")
+            await asyncio.sleep(300)
 
 # Обработчики команд и состояний
 @dp.message(Command("start"))
@@ -311,8 +403,14 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
     lang = user_data['language'] or 'ru'
     data = callback.data
     
-    # Проверяем есть ли активный инвойс на пополнение
-    if await has_active_invoice(user_id) and data.startswith('city_'):
+    # Проверяем есть ли активный инвойс
+    async with db_pool.acquire() as conn:
+        active_invoice = await conn.fetchrow(
+            "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW()",
+            user_id
+        )
+    
+    if active_invoice and data.startswith('city_'):
         # Показываем экран с инвойсом вместо перехода к выбору города
         await show_active_invoice(callback, state, user_id, lang)
         return
@@ -757,8 +855,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         
         # Создаем заказ с LTC
         order_id = f"order_{int(time.time())}_{user_id}"
-        
-        # Получаем текущий курс LTC (теперь всегда возвращает число)
+                # Получаем текущий курс LTC (теперь всегда возвращает число)
         ltc_rate = await get_ltc_usd_rate()
         
         # Конвертируем USD в LTC
@@ -775,7 +872,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         # Создаем QR-код
         qr_code = ltc_wallet.get_qr_code(address_data['address'], amount_ltc)
         
-        expires_at = datetime.now() + timedelta(minutes=60)
+        expires_at = datetime.now() + timedelta(minutes=30)
         await add_transaction(
             user_id,
             price,
@@ -805,6 +902,9 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         except Exception as e:
             logger.error(f"Error sending QR code: {e}")
             await callback.message.answer(text=payment_text)
+        
+        # Запускаем уведомления для этого инвойса
+        asyncio.create_task(invoice_notification_loop(user_id, order_id, lang))
         
         await state.set_state(Form.payment)
     else:
@@ -843,15 +943,6 @@ async def process_balance(message: types.Message, state: FSMContext):
         order_id = f"topup_{int(time.time())}_{user.id}"
         expires_at = datetime.now() + timedelta(minutes=30)
         
-        # Сохраняем информацию о транзакции в состоянии
-        await state.update_data(
-            topup_invoice=order_id,
-            topup_amount=amount,
-            topup_address=address_data['address'],
-            topup_ltc_amount=amount_ltc,
-            topup_expires=expires_at
-        )
-        
         await add_transaction(
             user.id,
             amount,
@@ -866,7 +957,7 @@ async def process_balance(message: types.Message, state: FSMContext):
         )
         
         # Форматируем время истечения
-        expires_str = expires_at.strftime("%d.%m.%Y, %I:%M %p")
+        expires_str = expires_at.strftime("%d.%m.%Y, %H:%M:%S")
         
         payment_text = f"""💳 Пополнение баланса
 
@@ -902,6 +993,9 @@ async def process_balance(message: types.Message, state: FSMContext):
                 parse_mode='Markdown'
             )
             
+        # Запускаем уведомления для этого инвойса
+        asyncio.create_task(invoice_notification_loop(user.id, order_id, lang))
+            
     except ValueError:
         await message.answer(get_text(lang, 'error'))
 
@@ -918,14 +1012,50 @@ async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
     user_data = await get_user(user_id)
     lang = user_data['language'] or 'ru'
     
-    # Обновляем статус транзакции на отмененный
-    data = await state.get_data()
-    if 'topup_invoice' in data:
-        await update_transaction_status(data['topup_invoice'], 'cancelled')
+    async with db_pool.acquire() as conn:
+        # Обновляем статус транзакции
+        await conn.execute(
+            "UPDATE transactions SET status = 'cancelled' WHERE user_id = $1 AND status = 'pending'",
+            user_id
+        )
+        
+        # Увеличиваем счетчик неудачных попыток
+        user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        new_failed = (user['failed_payments'] or 0) + 1
+        await conn.execute(
+            "UPDATE users SET failed_payments = $1 WHERE user_id = $2",
+            new_failed, user_id
+        )
+        
+        # Проверяем на бан
+        if new_failed >= 3:
+            ban_until = datetime.now() + timedelta(hours=24)
+            await conn.execute(
+                "UPDATE users SET ban_until = $1 WHERE user_id = $2",
+                ban_until, user_id
+            )
     
-    await callback.answer("Пополнение отменено")
-    await show_balance_menu(callback, state)
-    await state.set_state(Form.balance_menu)
+    # Отменяем уведомления
+    if user_id in invoice_notifications:
+        invoice_notifications[user_id].cancel()
+        del invoice_notifications[user_id]
+    
+    await callback.answer()
+    await callback.message.edit_text(
+        text=get_text(lang, 'invoice_cancelled', failed_count=new_failed)
+    )
+    
+    if new_failed == 2:
+        await callback.message.answer(
+            text=get_text(lang, 'almost_banned', remaining=1)
+        )
+    elif new_failed >= 3:
+        await callback.message.answer(
+            text=get_text(lang, 'ban_message')
+        )
+    
+    await show_main_menu(callback.message, state, user_id, lang)
+    await state.set_state(Form.main_menu)
 
 @dp.callback_query(F.data == "back_to_topup_menu")
 async def back_to_topup_menu(callback: types.CallbackQuery, state: FSMContext):

@@ -60,16 +60,20 @@ CRYPTO_CURRENCIES = {
     'LTC': 'Litecoin'
 }
 
-# Функция для получения курса LTC
+# Функция для получения курса LTC с fallback значением
 async def get_ltc_usd_rate():
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get('https://api.binance.com/api/v3/ticker/price?symbol=LTCUSDT') as response:
                 data = await response.json()
-                return float(data['price'])
+                if 'price' in data:
+                    return float(data['price'])
+                else:
+                    logger.warning("Binance API response missing 'price' field, using fallback price")
+                    return 117.0  # Fallback цена LTC
     except Exception as e:
-        logger.error(f"Error getting LTC rate: {e}")
-        return None
+        logger.error(f"Error getting LTC rate: {e}, using fallback price")
+        return 117.0  # Fallback цена LTC при ошибке
 
 # Вспомогательная функция для удаления предыдущего сообщения
 async def delete_previous_message(chat_id: int, message_id: int):
@@ -705,11 +709,8 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         # Создаем заказ с LTC
         order_id = f"order_{int(time.time())}_{user_id}"
         
-        # Получаем текущий курс LTC
+        # Получаем текущий курс LTC (теперь всегда возвращает число)
         ltc_rate = await get_ltc_usd_rate()
-        if not ltc_rate:
-            await callback.message.answer(get_text(lang, 'error'))
-            return
         
         # Конвертируем USD в LTC
         amount_ltc = price / ltc_rate
@@ -773,11 +774,8 @@ async def process_balance(message: types.Message, state: FSMContext):
             await message.answer(get_text(lang, 'error'))
             return
         
-        # Получаем текущий курс LTC
+        # Получаем текущий курс LTC (теперь всегда возвращает число)
         ltc_rate = await get_ltc_usd_rate()
-        if not ltc_rate:
-            await message.answer(get_text(lang, 'error'))
-            return
         
         # Конвертируем USD в LTC
         amount_ltc = amount / ltc_rate

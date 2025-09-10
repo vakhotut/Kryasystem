@@ -3,9 +3,6 @@ import random
 import time
 import asyncio
 import os
-import hmac
-import hashlib
-import jwt
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -15,8 +12,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 import aiohttp
-from aiohttp import web
-import asyncpg
 
 from db import (
     init_db, get_user, update_user, add_transaction, add_purchase, 
@@ -25,7 +20,7 @@ from db import (
     load_cache,
     get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache, get_categories_cache
 )
-from cryptocloud import create_cryptocloud_invoice, get_cryptocloud_invoice_status, check_payment_status_periodically, cancel_cryptocloud_invoice
+from blockcypher import generate_ltc_address, get_ltc_usd_rate, check_address_balance
 
 # Настройки логирования
 logging.basicConfig(
@@ -36,11 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Настройки бота
 TOKEN = os.getenv("BOT_TOKEN")
-CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY")
-CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID")
-CRYPTOCLOUD_SECRET_KEY = os.getenv("CRYPTOCLOUD_SECRET_KEY")  # Добавлен секретный ключ
 DATABASE_URL = os.environ.get('DATABASE_URL')
-POSTBACK_SECRET = os.getenv("POSTBACK_SECRET", CRYPTOCLOUD_SECRET_KEY)
 
 # Состояния разговора
 class Form(StatesGroup):
@@ -64,11 +55,8 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 db_pool = None
 
-# Доступные криптовалюты
+# Доступные криптовалюты (только LTC)
 CRYPTO_CURRENCIES = {
-    'BTC': 'Bitcoin',
-    'ETH': 'Ethereum',
-    'USDT': 'Tether (TRC20)',
     'LTC': 'Litecoin'
 }
 
@@ -85,14 +73,11 @@ async def check_pending_transactions_loop():
         try:
             transactions = await get_pending_transactions()
             for transaction in transactions:
-                invoice_uuid = transaction['invoice_uuid']
-                status_info = await get_cryptocloud_invoice_status(invoice_uuid)
-                
-                if status_info and status_info.get('status') == 'success' and len(status_info['result']) > 0:
-                    invoice = status_info['result'][0]
-                    invoice_status = invoice['status']
-                    if invoice_status == 'paid':
-                        await update_transaction_status_by_uuid(invoice_uuid, 'paid')
+                if transaction['crypto_address'] and transaction['crypto_amount']:
+                    balance_info = await check_address_balance(transaction['crypto_address'])
+                    
+                    if balance_info and balance_info['final_balance'] >= transaction['crypto_amount'] * 10**8:
+                        await update_transaction_status(transaction['order_id'], 'paid')
                         
                         user_id = transaction['user_id']
                         product_info = transaction['product_info']
@@ -103,131 +88,27 @@ async def check_pending_transactions_loop():
                         products_cache = get_products_cache()
                         product_image = products_cache.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
                         
+                        user = await get_user(user_id)
+                        lang = user['language'] or 'ru' if user else 'ru'
+                        
                         await bot.send_message(
                             chat_id=user_id,
-                            text=get_text('ru', 'payment_success', product_image=product_image)
+                            text=get_text(lang, 'payment_success', product_image=product_image)
                         )
                         
-                    elif invoice_status in ['expired', 'canceled']:
-                        await update_transaction_status_by_uuid(invoice_uuid, invoice_status)
+                        # Добавляем покупку в историю
+                        await add_purchase(
+                            user_id,
+                            product_info,
+                            transaction['amount'],
+                            '',
+                            ''
+                        )
             
-            await asyncio.sleep(60)
+            await asyncio.sleep(300)  # Проверяем каждые 5 минут
         except Exception as e:
             logger.error(f"Error in check_pending_transactions: {e}")
-            await asyncio.sleep(60)
-
-# Обработчик POSTBACK уведомлений от CryptoCloud (ИСПРАВЛЕННАЯ ВЕРСИЯ)
-async def handle_cryptocloud_postback(request):
-    try:
-        # Читаем данные в формате x-www-form-urlencoded
-        data = await request.post()
-        data_dict = dict(data)
-        
-        logger.info(f"Received CryptoCloud postback: {data_dict}")
-        
-        # Проверяем наличие обязательных полей
-        if 'token' not in data_dict:
-            logger.warning("No token in CryptoCloud postback")
-            return web.json_response({'status': 'error', 'message': 'No token'}, status=400)
-            
-        if 'status' not in data_dict:
-            logger.warning("No status in CryptoCloud postback")
-            return web.json_response({'status': 'error', 'message': 'No status'}, status=400)
-            
-        if 'order_id' not in data_dict:
-            logger.warning("No order_id in CryptoCloud postback")
-            return web.json_response({'status': 'error', 'message': 'No order_id'}, status=400)
-
-        # Проверяем JWT токен с использованием SECRET_KEY
-        token = data_dict['token']
-        if not CRYPTOCLOUD_SECRET_KEY:
-            logger.error("CRYPTOCLOUD_SECRET_KEY is not set in environment variables")
-            return web.json_response({'status': 'error', 'message': 'Server misconfiguration'}, status=500)
-            
-        try:
-            # Декодируем JWT с использованием SECRET_KEY
-            decoded = jwt.decode(token, CRYPTOCLOUD_SECRET_KEY, algorithms=['HS256'])
-            logger.info(f"Successfully decoded JWT token: {decoded}")
-        except jwt.ExpiredSignatureError:
-            logger.warning("Token expired in CryptoCloud postback")
-            return web.json_response({'status': 'error', 'message': 'Token expired'}, status=403)
-        except jwt.InvalidTokenError as e:
-            logger.warning(f"Invalid token in CryptoCloud postback: {e}")
-            return web.json_response({'status': 'error', 'message': 'Invalid token'}, status=403)
-
-        # Обработка успешного платежа
-        status = data_dict['status']
-        order_id = data_dict['order_id']
-        
-        if status == 'success' and order_id:
-            # Запускаем обработку в фоне
-            asyncio.create_task(process_successful_payment(order_id))
-            logger.info(f"Successfully received postback for order {order_id}")
-        
-        return web.json_response({'status': 'ok'})
-        
-    except Exception as e:
-        logger.error(f"Error processing CryptoCloud postback: {e}")
-        return web.json_response({'status': 'error', 'message': str(e)}, status=500)
-
-async def process_successful_payment(order_id):
-    try:
-        async with db_pool.acquire() as conn:
-            transaction = await conn.fetchrow('SELECT * FROM transactions WHERE order_id = $1', order_id)
-        
-        if not transaction:
-            logger.error(f"Transaction not found for order_id: {order_id}")
-            return
-            
-        await update_transaction_status(order_id, 'paid')
-        
-        user_id = transaction['user_id']
-        product_info = transaction['product_info']
-        price = transaction['amount']
-        
-        # Проверяем, является ли это пополнением баланса
-        if "Пополнение баланса" in product_info:
-            # Пополняем баланс пользователя
-            user = await get_user(user_id)
-            new_balance = (user['balance'] or 0) + price
-            await update_user(user_id, balance=new_balance)
-            
-            lang = user['language'] or 'ru' if user else 'ru'
-            
-            await bot.send_message(
-                chat_id=user_id,
-                text=get_text(lang, 'balance_add_success', amount=price, balance=new_balance)
-            )
-            
-            logger.info(f"Balance topped up for user {user_id}: +{price}$, new balance: {new_balance}$")
-        else:
-            # Обычная покупка товара
-            await add_purchase(
-                user_id,
-                product_info,
-                price,
-                '',
-                ''
-            )
-            
-            product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
-            city = product_info.split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
-            
-            user = await get_user(user_id)
-            lang = user['language'] or 'ru' if user else 'ru'
-            
-            products_cache = get_products_cache()
-            product_image = products_cache.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
-            
-            await bot.send_message(
-                chat_id=user_id,
-                text=get_text(lang, 'payment_success', product_image=product_image)
-            )
-            
-            logger.info(f"Successfully processed purchase for user {user_id}, order {order_id}")
-    
-    except Exception as e:
-        logger.error(f"Error processing successful payment: {e}")
+            await asyncio.sleep(300)
 
 # Функция для показа меню баланса
 async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
@@ -259,7 +140,6 @@ async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMCont
     
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="LTC", callback_data="topup_ltc"))
-    builder.row(InlineKeyboardButton(text="BTC", callback_data="topup_btc"))
     builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_balance_menu"))
     
     image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
@@ -515,9 +395,8 @@ async def process_topup_currency(callback: types.CallbackQuery, state: FSMContex
     if data == 'back_to_balance_menu':
         await show_balance_menu(callback, state)
         await state.set_state(Form.balance_menu)
-    elif data in ['topup_ltc', 'topup_btc']:
-        currency = 'LTC' if data == 'topup_ltc' else 'BTC'
-        await state.update_data(topup_currency=currency)
+    elif data == 'topup_ltc':
+        await state.update_data(topup_currency='LTC')
         
         await callback.message.answer(get_text(lang, 'balance_add'))
         await state.set_state(Form.balance)
@@ -776,9 +655,6 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
     
     if data == 'confirm_yes':
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text="BTC", callback_data="crypto_BTC"))
-        builder.row(InlineKeyboardButton(text="ETH", callback_data="crypto_ETH"))
-        builder.row(InlineKeyboardButton(text="USDT", callback_data="crypto_USDT"))
         builder.row(InlineKeyboardButton(text="LTC", callback_data="crypto_LTC"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_confirmation"))
         
@@ -835,81 +711,72 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         await state.set_state(Form.confirmation)
         return
     
-    crypto_currency = data.replace('crypto_', '')
-    await state.update_data(crypto_currency=crypto_currency)
-    
-    state_data = await state.get_data()
-    city = state_data.get('city')
-    product = state_data.get('product')
-    price = state_data.get('price')
-    district = state_data.get('district')
-    delivery_type = state_data.get('delivery_type')
-    
-    product_info = f"{product} в {city}, район {district}, {delivery_type}"
-    
-    # Создаем заказ в CryptoCloud
-    order_id = f"order_{int(time.time())}_{user_id}"
-    price_usd = price
-    
-    invoice_resp = await create_cryptocloud_invoice(price_usd, crypto_currency, order_id, test_mode=False)
-
-    if not invoice_resp:
-        logger.error("create_cryptocloud_invoice returned None")
-        await callback.message.answer(get_text(lang, 'error'))
-        return
-
-    if invoice_resp.get('status') != 'success' or not invoice_resp.get('result'):
-        logger.error(f"Invoice creation failed: {invoice_resp}")
-        await callback.message.answer(get_text(lang, 'error'))
-        return
-
-    invoice_data = invoice_resp['result']
-    invoice_uuid = invoice_data.get('uuid')
-    payment_url = invoice_data.get('link') or invoice_data.get('pay_url')
-
-    address = invoice_data.get('address') or ''
-    if not address and invoice_uuid:
-        info = await get_cryptocloud_invoice_status(invoice_uuid)
-        if info and info.get('status') == 'success' and len(info.get('result', [])) > 0:
-            address = info['result'][0].get('address', '') or ''
-
-    expires_at = datetime.now() + timedelta(minutes=60)
-    await add_transaction(
-        user_id,
-        price,
-        crypto_currency,
-        order_id,
-        payment_url,
-        expires_at,
-        product_info,
-        invoice_uuid
-    )
-
-    if address:
-        qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={address}"
+    # Для LTC
+    if data == 'crypto_LTC':
+        state_data = await state.get_data()
+        city = state_data.get('city')
+        product = state_data.get('product')
+        price = state_data.get('price')
+        district = state_data.get('district')
+        delivery_type = state_data.get('delivery_type')
+        
+        product_info = f"{product} в {city}, район {district}, {delivery_type}"
+        
+        # Создаем заказ с LTC
+        order_id = f"order_{int(time.time())}_{user_id}"
+        
+        # Получаем текущий курс LTC
+        ltc_rate = await get_ltc_usd_rate()
+        if not ltc_rate:
+            await callback.message.answer(get_text(lang, 'error'))
+            return
+        
+        # Конвертируем USD в LTC
+        amount_ltc = price / ltc_rate
+        
+        # Генерируем новый LTC адрес
+        address_data = await generate_ltc_address()
+        if not address_data:
+            await callback.message.answer(get_text(lang, 'error'))
+            return
+        
+        # Создаем QR-код
+        qr_code = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=litecoin:{address_data['address']}?amount={amount_ltc}"
+        
+        expires_at = datetime.now() + timedelta(minutes=60)
+        await add_transaction(
+            user_id,
+            price,
+            'LTC',
+            order_id,
+            qr_code,
+            expires_at,
+            product_info,
+            order_id,  # Используем order_id как invoice_uuid
+            address_data['address'],
+            amount_ltc
+        )
+        
         payment_text = get_text(
             lang,
             'payment_instructions',
-            amount=price,
-            currency=crypto_currency,
-            payment_address=address
+            amount=round(amount_ltc, 8),
+            currency='LTC',
+            payment_address=address_data['address']
         )
+        
         try:
             await callback.message.answer_photo(
-                photo=qr_code_url,
+                photo=qr_code,
                 caption=payment_text
             )
         except Exception as e:
             logger.error(f"Error sending QR code: {e}")
-            await callback.message.answer(
-                text=payment_text
-            )
+            await callback.message.answer(text=payment_text)
+        
+        await state.set_state(Form.payment)
     else:
-        logger.error(f"No address generated for invoice: {invoice_resp}")
-        fallback_text = f"Не удалось получить адрес напрямую. Откройте страницу оплаты: {payment_url}"
-        await callback.message.answer(text=fallback_text)
-
-    await state.set_state(Form.payment)
+        await callback.message.answer("Currently only LTC is supported")
 
 @dp.message(Form.balance)
 async def process_balance(message: types.Message, state: FSMContext):
@@ -924,57 +791,55 @@ async def process_balance(message: types.Message, state: FSMContext):
             await message.answer(get_text(lang, 'error'))
             return
         
-        # Получаем выбранную валюту из состояния
-        state_data = await state.get_data()
-        currency = state_data.get('topup_currency', 'LTC')
-        
-        # Создаем инвойс для пополнения баланса
-        order_id = f"topup_{int(time.time())}_{user.id}"
-        
-        invoice_resp = await create_cryptocloud_invoice(amount, currency, order_id, test_mode=False)
-        
-        if not invoice_resp or invoice_resp.get('status') != 'success' or not invoice_resp.get('result'):
+        # Получаем текущий курс LTC
+        ltc_rate = await get_ltc_usd_rate()
+        if not ltc_rate:
             await message.answer(get_text(lang, 'error'))
             return
-            
-        invoice_data = invoice_resp['result']
-        invoice_uuid = invoice_data.get('uuid')
-        payment_url = invoice_data.get('link') or invoice_data.get('pay_url')
-        address = invoice_data.get('address') or ''
         
+        # Конвертируем USD в LTC
+        amount_ltc = amount / ltc_rate
+        
+        # Генерируем новый LTC адрес
+        address_data = await generate_ltc_address()
+        if not address_data:
+            await message.answer(get_text(lang, 'error'))
+            return
+        
+        # Создаем QR-код
+        qr_code = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=litecoin:{address_data['address']}?amount={amount_ltc}"
+        
+        order_id = f"topup_{int(time.time())}_{user.id}"
         expires_at = datetime.now() + timedelta(minutes=30)
         await add_transaction(
             user.id,
             amount,
-            currency,
+            'LTC',
             order_id,
-            payment_url,
+            qr_code,
             expires_at,
             f"Пополнение баланса на {amount}$",
-            invoice_uuid
+            order_id,
+            address_data['address'],
+            amount_ltc
         )
         
-        if address:
-            qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={address}"
-            payment_text = get_text(
-                lang,
-                'payment_instructions',
-                amount=amount,
-                currency=currency,
-                payment_address=address
+        payment_text = get_text(
+            lang,
+            'payment_instructions',
+            amount=round(amount_ltc, 8),
+            currency='LTC',
+            payment_address=address_data['address']
+        )
+        
+        try:
+            await message.answer_photo(
+                photo=qr_code,
+                caption=payment_text
             )
-            
-            try:
-                await message.answer_photo(
-                    photo=qr_code_url,
-                    caption=payment_text
-                )
-            except Exception as e:
-                logger.error(f"Error sending QR code: {e}")
-                await message.answer(text=payment_text)
-        else:
-            fallback_text = f"Не удалось получить адрес напрямую. Откройте страницу оплаты: {payment_url}"
-            await message.answer(text=fallback_text)
+        except Exception as e:
+            logger.error(f"Error sending QR code: {e}")
+            await message.answer(text=payment_text)
             
     except ValueError:
         await message.answer(get_text(lang, 'error'))
@@ -1001,10 +866,6 @@ async def handle_text(message: types.Message, state: FSMContext):
         await show_main_menu(message, state, user_id, lang)
         await state.set_state(Form.main_menu)
 
-async def on_startup(app):
-    # Запускаем проверку pending транзакций в фоне
-    asyncio.create_task(check_pending_transactions_loop())
-
 async def main():
     global db_pool
     
@@ -1017,20 +878,8 @@ async def main():
     # Принудительно загружаем кэш после инициализации БД
     await load_cache()
     
-    # Создаем aiohttp приложение для обработки postback-ов
-    postback_app = web.Application()
-    postback_app.router.add_post('/cryptocloud_postback', handle_cryptocloud_postback)
-    
-    # Запускаем aiohttp сервер в фоне
-    runner = web.AppRunner(postback_app)
-    await runner.setup()
-    
-    port = int(os.environ.get('POSTBACK_PORT', 5001))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    # Добавляем задержку для избежания конфликта поллинга
-    await asyncio.sleep(2)
+    # Запускаем проверку pending транзакций в фоне
+    asyncio.create_task(check_pending_transactions_loop())
     
     # Запускаем бота
     await dp.start_polling(bot)

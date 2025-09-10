@@ -25,7 +25,7 @@ async def generate_ltc_address():
                     }
                 else:
                     error = await response.text()
-                    logger.error(f"BlockCypher error: {error}")
+                    logger.error(f"BlockCypher error: {response.status} - {error}")
                     return None
     except Exception as e:
         logger.error(f"Error generating LTC address: {e}")
@@ -42,7 +42,7 @@ async def get_ltc_usd_rate():
                     data = await response.json()
                     return data['litecoin']['usd']
                 else:
-                    logger.error("Error getting LTC rate")
+                    logger.error(f"Error getting LTC rate: {response.status}")
                     return None
     except Exception as e:
         logger.error(f"Error getting LTC rate: {e}")
@@ -64,7 +64,7 @@ async def check_address_balance(address):
                     }
                 else:
                     error = await response.text()
-                    logger.error(f"BlockCypher balance error: {error}")
+                    logger.error(f"BlockCypher balance error: {response.status} - {error}")
                     return None
     except Exception as e:
         logger.error(f"Error checking address balance: {e}")

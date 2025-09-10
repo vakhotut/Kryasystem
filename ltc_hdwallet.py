@@ -5,9 +5,7 @@ from bip_utils import (
     Bip39SeedGenerator,
     Bip44,
     Bip44Coins,
-    Bip44Changes,
-    LitecoinConf,
-    Litecoin
+    Bip44Changes
 )
 from typing import Dict, Any
 import logging

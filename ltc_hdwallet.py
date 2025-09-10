@@ -1,7 +1,7 @@
 import os
 from hdwallet import HDWallet
 from hdwallet.symbols import LTC
-from hdwallet.utils import Mnemonic
+from hdwallet import Mnemonic
 from typing import Dict, Any
 import logging
 

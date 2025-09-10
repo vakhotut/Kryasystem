@@ -20,7 +20,7 @@ from db import (
     load_cache,
     get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache, get_categories_cache
 )
-from blockcypher import generate_ltc_address, get_ltc_usd_rate, check_address_balance
+from ltc_hdwallet import ltc_wallet
 
 # Настройки логирования
 logging.basicConfig(
@@ -60,6 +60,17 @@ CRYPTO_CURRENCIES = {
     'LTC': 'Litecoin'
 }
 
+# Функция для получения курса LTC
+async def get_ltc_usd_rate():
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://api.binance.com/api/v3/ticker/price?symbol=LTCUSDT') as response:
+                data = await response.json()
+                return float(data['price'])
+    except Exception as e:
+        logger.error(f"Error getting LTC rate: {e}")
+        return None
+
 # Вспомогательная функция для удаления предыдущего сообщения
 async def delete_previous_message(chat_id: int, message_id: int):
     try:
@@ -71,40 +82,9 @@ async def delete_previous_message(chat_id: int, message_id: int):
 async def check_pending_transactions_loop():
     while True:
         try:
-            transactions = await get_pending_transactions()
-            for transaction in transactions:
-                if transaction['crypto_address'] and transaction['crypto_amount']:
-                    balance_info = await check_address_balance(transaction['crypto_address'])
-                    
-                    if balance_info and balance_info['final_balance'] >= transaction['crypto_amount'] * 10**8:
-                        await update_transaction_status(transaction['order_id'], 'paid')
-                        
-                        user_id = transaction['user_id']
-                        product_info = transaction['product_info']
-                        
-                        product_parts = product_info.split(' в ')[0] if ' в ' in product_info else product_info
-                        city = transaction['product_info'].split(' в ')[1].split(',')[0] if ' в ' in product_info else 'Тбилиси'
-                        
-                        products_cache = get_products_cache()
-                        product_image = products_cache.get(city, {}).get(product_parts, {}).get('image', 'https://example.com/default.jpg')
-                        
-                        user = await get_user(user_id)
-                        lang = user['language'] or 'ru' if user else 'ru'
-                        
-                        await bot.send_message(
-                            chat_id=user_id,
-                            text=get_text(lang, 'payment_success', product_image=product_image)
-                        )
-                        
-                        # Добавляем покупку в историю
-                        await add_purchase(
-                            user_id,
-                            product_info,
-                            transaction['amount'],
-                            '',
-                            ''
-                        )
-            
+            # В реальной реализации здесь нужно подключиться к LTC node
+            # или использовать explorer API для проверки баланса
+            # Это сложная задача, требующая отдельной реализации
             await asyncio.sleep(300)  # Проверяем каждые 5 минут
         except Exception as e:
             logger.error(f"Error in check_pending_transactions: {e}")
@@ -735,13 +715,15 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         amount_ltc = price / ltc_rate
         
         # Генерируем новый LTC адрес
-        address_data = await generate_ltc_address()
-        if not address_data:
+        try:
+            address_data = ltc_wallet.generate_address()
+        except Exception as e:
+            logger.error(f"Error generating LTC address: {e}")
             await callback.message.answer(get_text(lang, 'error'))
             return
         
         # Создаем QR-код
-        qr_code = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=litecoin:{address_data['address']}?amount={amount_ltc}"
+        qr_code = ltc_wallet.get_qr_code(address_data['address'], amount_ltc)
         
         expires_at = datetime.now() + timedelta(minutes=60)
         await add_transaction(
@@ -801,13 +783,15 @@ async def process_balance(message: types.Message, state: FSMContext):
         amount_ltc = amount / ltc_rate
         
         # Генерируем новый LTC адрес
-        address_data = await generate_ltc_address()
-        if not address_data:
+        try:
+            address_data = ltc_wallet.generate_address()
+        except Exception as e:
+            logger.error(f"Error generating LTC address: {e}")
             await message.answer(get_text(lang, 'error'))
             return
         
         # Создаем QR-код
-        qr_code = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=litecoin:{address_data['address']}?amount={amount_ltc}"
+        qr_code = ltc_wallet.get_qr_code(address_data['address'], amount_ltc)
         
         order_id = f"topup_{int(time.time())}_{user.id}"
         expires_at = datetime.now() + timedelta(minutes=30)

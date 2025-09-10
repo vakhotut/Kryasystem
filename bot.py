@@ -297,7 +297,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         last_order = await get_last_order(user_id)
         if last_order:
             order_text = (
-                f"📦 Товар: {last_order['product']}\n"
+                f"📦 Т товар: {last_order['product']}\n"
                 f"💵 Стоимость: {last_order['price']}$\n"
                 f"🏙 Район: {last_order['district']}\n"
                 f"🚚 Тип доставки: {last_order['delivery_type']}\n"
@@ -489,7 +489,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
         
         if city not in products_cache or product_name not in products_cache[city]:
             sent_message = await callback.message.answer(
-                text=get_text(lang, 'error')
+            text=get_text(lang, 'error')
             )
             await state.update_data(last_message_id=sent_message.message_id)
             return
@@ -737,7 +737,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             product_info,
             order_id,  # Используем order_id как invoice_uuid
             address_data['address'],
-            amount_ltc
+            str(amount_ltc)  # Конвертируем float в string
         )
         
         payment_text = get_text(
@@ -803,7 +803,7 @@ async def process_balance(message: types.Message, state: FSMContext):
             f"Пополнение баланса на {amount}$",
             order_id,
             address_data['address'],
-            amount_ltc
+            str(amount_ltc)  # Конвертируем float в string
         )
         
         payment_text = get_text(

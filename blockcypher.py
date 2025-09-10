@@ -3,6 +3,7 @@ import aiohttp
 import asyncio
 import logging
 import time
+import random
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ async def generate_ltc_address():
         return None
 
 async def get_ltc_usd_rate():
-    """Получение текущего курса LTC к USD через Binance"""
+    """Получение текущего курса LTC к USD через различные источники"""
     global ltc_rate_cache, ltc_rate_time
     
     # Проверяем кэш
@@ -48,39 +49,56 @@ async def get_ltc_usd_rate():
     if ltc_rate_cache and (current_time - ltc_rate_time) < CACHE_DURATION:
         return ltc_rate_cache
     
-    url = 'https://api.binance.com/api/v3/ticker/price?symbol=LTCUSDT'
+    # Список API для получения курса LTC (в порядке приоритета)
+    apis = [
+        # CoinGecko
+        'https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd',
+        # CryptoCompare
+        'https://min-api.cryptocompare.com/data/price?fsym=LTC&tsyms=USD',
+        # Coinbase
+        'https://api.coinbase.com/v2/prices/LTC-USD/spot',
+        # Kraken
+        'https://api.kraken.com/0/public/Ticker?pair=LTCUSD',
+    ]
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    ltc_rate_cache = float(data['price'])
-                    ltc_rate_time = current_time
-                    return ltc_rate_cache
-                else:
-                    logger.error(f"Error getting LTC rate from Binance: {response.status}")
-                    return None
-    except Exception as e:
-        logger.error(f"Error getting LTC rate from Binance: {e}")
-        
-        # Если Binance не работает, пробуем CoinGecko
-        url = 'https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd'
-        
+    # Перемешиваем порядок API для распределения нагрузки
+    random.shuffle(apis)
+    
+    for api_url in apis:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
+                async with session.get(api_url, timeout=5) as response:
                     if response.status == 200:
                         data = await response.json()
-                        ltc_rate_cache = data['litecoin']['usd']
+                        
+                        # Обработка разных форматов ответов
+                        if 'coingecko' in api_url:
+                            rate = data['litecoin']['usd']
+                        elif 'cryptocompare' in api_url:
+                            rate = data['USD']
+                        elif 'coinbase' in api_url:
+                            rate = float(data['data']['amount'])
+                        elif 'kraken' in api_url:
+                            rate = float(data['result']['XLTCZUSD']['c'][0])
+                        else:
+                            continue
+                            
+                        ltc_rate_cache = rate
                         ltc_rate_time = current_time
-                        return ltc_rate_cache
-                    else:
-                        logger.error(f"Error getting LTC rate from CoinGecko: {response.status}")
-                        return None
+                        logger.info(f"Successfully got LTC rate from {api_url}: {rate}")
+                        return rate
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout getting LTC rate from {api_url}")
+            continue
         except Exception as e:
-            logger.error(f"Error getting LTC rate from CoinGecko: {e}")
-            return None
+            logger.warning(f"Error getting LTC rate from {api_url}: {e}")
+            continue
+    
+    # Если все API не сработали, используем фиксированный курс как запасной вариант
+    logger.error("All LTC rate APIs failed, using fallback rate")
+    ltc_rate_cache = 70.0  # Примерный курс как запасной вариант
+    ltc_rate_time = current_time
+    return ltc_rate_cache
 
 async def check_address_balance(address):
     """Проверка баланса LTC адреса"""

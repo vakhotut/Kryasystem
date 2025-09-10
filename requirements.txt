@@ -6,3 +6,5 @@ python-multipart==0.0.6
 cryptography==41.0.4
 qrcode==7.4.2
 pillow==10.0.1
+hdwallet==2.2.4
+bip-utils==2.7.0

@@ -161,6 +161,31 @@ async def init_db(database_url):
             )
             ''')
             
+            # Таблица проданных товаров
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS sold_products (
+                id SERIAL PRIMARY KEY,
+                product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+                user_id BIGINT REFERENCES users(user_id),
+                quantity INTEGER DEFAULT 1,
+                sold_price REAL NOT NULL,
+                sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                purchase_id INTEGER REFERENCES purchases(id)
+            )
+            ''')
+            
+            # Таблица товаров на рассмотрении возврата
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS disputed_products (
+                id SERIAL PRIMARY KEY,
+                sold_product_id INTEGER REFERENCES sold_products(id),
+                reason TEXT,
+                status TEXT DEFAULT 'pending', -- pending, approved, rejected
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TIMESTAMP
+            )
+            ''')
+            
             # Добавляем недостающие столбцы, если они еще не существуют
             columns_to_check = [
                 'category_id', 'district_id', 'delivery_type_id', 'uuid', 'description'
@@ -231,6 +256,7 @@ async def init_default_data(conn):
 Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
 English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ქартули: https://telegra.ph/KA-როგორ-შევავსოთ-ბალანსი-Litecoin-ით-LTC-06-15''',
+
                 'balance_topup_info': '''💳 Пополнение баланса
 
 ❗️ Важная информация:
@@ -671,6 +697,26 @@ async def add_purchase(user_id, product, price, district, delivery_type):
     except Exception as e:
         logger.error(f"Error adding purchase for user {user_id}: {e}")
 
+async def add_sold_product(product_id, user_id, quantity, sold_price, purchase_id):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+            INSERT INTO sold_products (product_id, user_id, quantity, sold_price, purchase_id)
+            VALUES ($1, $2, $3, $4, $5)
+            ''', product_id, user_id, quantity, sold_price, purchase_id)
+    except Exception as e:
+        logger.error(f"Error adding sold product for user {user_id}: {e}")
+
+async def add_disputed_product(sold_product_id, reason):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+            INSERT INTO disputed_products (sold_product_id, reason)
+            VALUES ($1, $2)
+            ''', sold_product_id, reason)
+    except Exception as e:
+        logger.error(f"Error adding disputed product: {e}")
+
 async def get_pending_transactions():
     try:
         async with db_pool.acquire() as conn:
@@ -750,3 +796,54 @@ def get_categories_cache():
 
 def get_texts_cache():
     return texts_cache
+
+# Функции для работы с проданными товарами и disputes
+async def get_sold_products(page=1, per_page=20):
+    try:
+        offset = (page - 1) * per_page
+        async with db_pool.acquire() as conn:
+            sold_products = await conn.fetch('''
+                SELECT sp.*, p.name as product_name, u.user_id, u.username
+                FROM sold_products sp
+                LEFT JOIN products p ON sp.product_id = p.id
+                LEFT JOIN users u ON sp.user_id = u.user_id
+                ORDER BY sp.sold_at DESC
+                LIMIT $1 OFFSET $2
+            ''', per_page, offset)
+            
+            total = await conn.fetchval('SELECT COUNT(*) FROM sold_products')
+            return sold_products, total
+    except Exception as e:
+        logger.error(f"Error getting sold products: {e}")
+        return [], 0
+
+async def get_disputed_products(page=1, per_page=20):
+    try:
+        offset = (page - 1) * per_page
+        async with db_pool.acquire() as conn:
+            disputed_products = await conn.fetch('''
+                SELECT dp.*, p.name as product_name, u.user_id, u.username, sp.sold_price
+                FROM disputed_products dp
+                LEFT JOIN sold_products sp ON dp.sold_product_id = sp.id
+                LEFT JOIN products p ON sp.product_id = p.id
+                LEFT JOIN users u ON sp.user_id = u.user_id
+                ORDER BY dp.created_at DESC
+                LIMIT $1 OFFSET $2
+            ''', per_page, offset)
+            
+            total = await conn.fetchval('SELECT COUNT(*) FROM disputed_products')
+            return disputed_products, total
+    except Exception as e:
+        logger.error(f"Error getting disputed products: {e}")
+        return [], 0
+
+async def update_dispute_status(dispute_id, status):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE disputed_products 
+                SET status = $1, resolved_at = CURRENT_TIMESTAMP
+                WHERE id = $2
+            ''', status, dispute_id)
+    except Exception as e:
+        logger.error(f"Error updating dispute status: {e}")

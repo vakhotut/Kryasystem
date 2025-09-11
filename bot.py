@@ -24,7 +24,7 @@ from db import (
     get_last_order, is_banned, get_text, 
     load_cache,
     get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache, get_categories_cache,
-    has_active_invoice
+    has_active_invoice, add_sold_product
 )
 from ltc_hdwallet import ltc_wallet
 from api import get_ltc_usd_rate, check_ltc_transaction
@@ -145,7 +145,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                             order_id
                         )
                         
-                        # Увеличиваем счетчик неудачных попыток
+                        # Увеличиваем счетчик неудачных попыток только при истечении времени
                         user = await conn.fetchrow(
                             "SELECT * FROM users WHERE user_id = $1", user_id
                         )
@@ -295,14 +295,24 @@ async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, 
             asyncio.create_task(invoice_notification_loop(user_id, invoice['order_id'], lang))
             
             try:
-                await callback.message.answer_photo(
-                    photo=invoice['payment_url'],
-                    caption=payment_text,
-                    reply_markup=builder.as_markup(),
-                    parse_mode='Markdown'
-                )
+                # Проверяем, является ли payment_url действительным URL изображения
+                if invoice['payment_url'] and invoice['payment_url'].startswith('http'):
+                    await callback.message.answer_photo(
+                        photo=invoice['payment_url'],
+                        caption=payment_text,
+                        reply_markup=builder.as_markup(),
+                        parse_mode='Markdown'
+                    )
+                else:
+                    # Если это не URL, отправляем как текст
+                    await callback.message.answer(
+                        text=payment_text,
+                        reply_markup=builder.as_markup(),
+                        parse_mode='Markdown'
+                    )
             except Exception as e:
-                logger.error(f"Error sending invoice: {e}")
+                logger.error(f"Error sending invoice with photo: {e}")
+                # Fallback: отправляем только текст
                 await callback.message.answer(
                     text=payment_text,
                     reply_markup=builder.as_markup(),
@@ -881,7 +891,29 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             return
         
         if data == 'confirm_yes':
+            # Получаем данные о заказе
+            state_data = await state.get_data()
+            city = state_data.get('city')
+            product_name = state_data.get('product')
+            price = state_data.get('price')
+            district = state_data.get('district')
+            delivery_type = state_data.get('delivery_type')
+            
+            product_info = f"{product_name} в {city}, район {district}, {delivery_type}"
+            
+            # Проверяем баланс пользователя
+            user_balance = user_data['balance'] or 0
+            
             builder = InlineKeyboardBuilder()
+            
+            # Добавляем кнопку оплаты балансом, если средств достаточно
+            if user_balance >= price:
+                builder.row(InlineKeyboardButton(
+                    text=f"💰 Оплатить балансом (${user_balance})", 
+                    callback_data="pay_with_balance"
+                ))
+            
+            # Добавляем кнопки криптовалют
             builder.row(InlineKeyboardButton(text="LTC", callback_data="crypto_LTC"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_confirmation"))
             
@@ -896,6 +928,83 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             await state.set_state(Form.main_menu)
     except Exception as e:
         logger.error(f"Error processing confirmation: {e}")
+        await callback.answer("Произошла ошибка. Попробуйте позже.")
+
+# Новая функция для обработки оплаты балансом
+@dp.callback_query(F.data == "pay_with_balance")
+async def pay_with_balance(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        await callback.answer()
+        
+        user_id = callback.from_user.id
+        user_data = await get_user(user_id)
+        lang = user_data['language'] or 'ru'
+        
+        # Получаем данные о заказе
+        state_data = await state.get_data()
+        city = state_data.get('city')
+        product_name = state_data.get('product')
+        price = state_data.get('price')
+        district = state_data.get('district')
+        delivery_type = state_data.get('delivery_type')
+        
+        # Проверяем достаточно ли средств на балансе
+        if (user_data['balance'] or 0) < price:
+            await callback.message.answer("Недостаточно средств на балансе")
+            return
+        
+        # Получаем информацию о товаре для отправки
+        async with db_pool.acquire() as conn:
+            # Находим product_id по названию товара
+            product_row = await conn.fetchrow(
+                "SELECT * FROM products WHERE name = $1 AND city_id = (SELECT id FROM cities WHERE name = $2) LIMIT 1",
+                product_name, city
+            )
+            
+            if not product_row:
+                await callback.message.answer("Ошибка: товар не найден")
+                return
+            
+            # Списание средств
+            await conn.execute(
+                "UPDATE users SET balance = balance - $1 WHERE user_id = $2",
+                price, user_id
+            )
+            
+            # Добавляем покупку
+            purchase_id = await add_purchase(
+                user_id, product_name, price, district, delivery_type
+            )
+            
+            if purchase_id:
+                # Добавляем запись о проданном товаре
+                await add_sold_product(
+                    product_row['id'], user_id, 1, price, purchase_id
+                )
+        
+        # Уведомляем пользователя
+        await callback.message.answer(
+            f"✅ Оплата прошла успешно! Товар {product_name} будет доставлен."
+        )
+        
+        # Отправляем фото и описание товара
+        if product_row['image_url']:
+            caption = f"{product_row['name']}\n\n{product_row['description']}\n\nЦена: ${price}"
+            await callback.message.answer_photo(
+                photo=product_row['image_url'],
+                caption=caption
+            )
+        else:
+            await callback.message.answer(
+                f"{product_row['name']}\n\n{product_row['description']}\n\nЦена: ${price}"
+            )
+        
+        # Возвращаем в главное меню
+        await show_main_menu(callback.message, state, user_id, lang)
+        await state.set_state(Form.main_menu)
+        
+    except Exception as e:
+        logger.error(f"Error in pay_with_balance: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.crypto_currency)
@@ -946,16 +1055,29 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         if data == 'crypto_LTC':
             state_data = await state.get_data()
             city = state_data.get('city')
-            product = state_data.get('product')
+            product_name = state_data.get('product')
             price = state_data.get('price')
             district = state_data.get('district')
             delivery_type = state_data.get('delivery_type')
             
-            product_info = f"{product} в {city}, район {district}, {delivery_type}"
+            product_info = f"{product_name} в {city}, район {district}, {delivery_type}"
             
             order_id = f"order_{int(time.time())}_{user_id}"
             ltc_rate = await get_ltc_usd_rate()
             amount_ltc = price / ltc_rate
+            
+            # Получаем product_id для добавления в sold_products после оплаты
+            async with db_pool.acquire() as conn:
+                product_row = await conn.fetchrow(
+                    "SELECT id FROM products WHERE name = $1 AND city_id = (SELECT id FROM cities WHERE name = $2) LIMIT 1",
+                    product_name, city
+                )
+                
+                if not product_row:
+                    await callback.message.answer("Ошибка: товар не найден")
+                    return
+                
+                product_id = product_row['id']
             
             try:
                 address_data = ltc_wallet.generate_address()
@@ -980,6 +1102,9 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                 amount_ltc
             )
             
+            # Сохраняем product_id в state для использования после оплаты
+            await state.update_data(product_id=product_id)
+            
             # Новый формат текста для покупки
             expires_time = expires_at.strftime("%d.%m.%Y, %H:%M:%S")
             time_left = expires_at - datetime.now()
@@ -988,7 +1113,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             payment_text = get_text(
                 lang,
                 'purchase_invoice',
-                product=product,
+                product=product_name,
                 crypto_address=address_data['address'],
                 crypto_amount=round(amount_ltc, 8),
                 amount=price,
@@ -1155,13 +1280,40 @@ async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
                         district = parts[1].replace('район ', '')
                         delivery_type = parts[2]
                         
-                        await add_purchase(
+                        # Получаем product_id из state
+                        state_data = await state.get_data()
+                        product_id = state_data.get('product_id')
+                        
+                        # Добавляем покупку
+                        purchase_id = await add_purchase(
                             user_id,
                             product,
                             invoice['amount'],
                             district,
                             delivery_type
                         )
+                        
+                        if purchase_id and product_id:
+                            # Добавляем запись о проданном товаре
+                            await add_sold_product(product_id, user_id, 1, invoice['amount'], purchase_id)
+                            
+                            # Получаем информацию о товаре для отправки
+                            async with db_pool.acquire() as conn:
+                                product_info = await conn.fetchrow(
+                                    "SELECT * FROM products WHERE id = $1", 
+                                    product_id
+                                )
+                            
+                            # Отправляем фото и описание товара
+                            if product_info:
+                                caption = f"{product_info['name']}\n\n{product_info['description']}\n\nЦена: ${invoice['amount']}"
+                                if product_info['image_url']:
+                                    await callback.message.answer_photo(
+                                        photo=product_info['image_url'],
+                                        caption=caption
+                                    )
+                                else:
+                                    await callback.message.answer(caption)
                 
                 # Если это пополнение баланса, обновляем баланс
                 else:
@@ -1192,27 +1344,11 @@ async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
         lang = user_data['language'] or 'ru'
         
         async with db_pool.acquire() as conn:
-            # Обновляем статус транзакции
+            # Обновляем статус транзакции (только отмена, без увеличения счетчика попыток)
             await conn.execute(
                 "UPDATE transactions SET status = 'cancelled' WHERE user_id = $1 AND status = 'pending'",
                 user_id
             )
-            
-            # Увеличиваем счетчик неудачных попыток
-            user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
-            new_failed = (user['failed_payments'] or 0) + 1
-            await conn.execute(
-                "UPDATE users SET failed_payments = $1 WHERE user_id = $2",
-                new_failed, user_id
-            )
-            
-            # Проверяем на бан
-            if new_failed >= 3:
-                ban_until = datetime.now() + timedelta(hours=24)
-                await conn.execute(
-                    "UPDATE users SET ban_until = $1 WHERE user_id = $2",
-                    ban_until, user_id
-                )
         
         # Отменяем уведомления
         if user_id in invoice_notifications:
@@ -1228,18 +1364,7 @@ async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
             logger.error(f"Error deleting invoice message: {e}")
         
         # Отправляем новое текстовое сообщение
-        await callback.message.answer(
-            text=get_text(lang, 'invoice_cancelled', failed_count=new_failed)
-        )
-        
-        if new_failed == 2:
-            await callback.message.answer(
-                text=get_text(lang, 'almost_banned', remaining=1)
-            )
-        elif new_failed >= 3:
-            await callback.message.answer(
-                text=get_text(lang, 'ban_message')
-            )
+        await callback.message.answer("❌ Инвойс отменен.")
         
         await show_main_menu(callback.message, state, user_id, lang)
         await state.set_state(Form.main_menu)

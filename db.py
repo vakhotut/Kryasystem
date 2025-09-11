@@ -451,7 +451,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ⚠️ მნიშვნელოვანი:
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
-• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
+• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუ�муტებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
@@ -683,19 +683,22 @@ async def add_transaction(user_id, amount, currency, order_id, payment_url, expi
 async def add_purchase(user_id, product, price, district, delivery_type):
     try:
         async with db_pool.acquire() as conn:
-            # Атомарное обновление счетчика покупок
-            await conn.execute('''
-            WITH new_purchase AS (
-                INSERT INTO purchases (user_id, product, price, district, delivery_type)
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING user_id
-            )
-            UPDATE users 
-            SET purchase_count = purchase_count + 1 
-            WHERE user_id = $1
+            # Атомарное обновление счетчика покупок и возврат ID покупки
+            purchase_id = await conn.fetchval('''
+            INSERT INTO purchases (user_id, product, price, district, delivery_type)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
             ''', user_id, product, price, district, delivery_type)
+            
+            # Обновляем счетчик покупок пользователя
+            await conn.execute('''
+            UPDATE users SET purchase_count = purchase_count + 1 WHERE user_id = $1
+            ''', user_id)
+            
+            return purchase_id
     except Exception as e:
         logger.error(f"Error adding purchase for user {user_id}: {e}")
+        return None
 
 async def add_sold_product(product_id, user_id, quantity, sold_price, purchase_id):
     try:

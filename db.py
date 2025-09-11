@@ -1,3 +1,4 @@
+# db.py
 import asyncpg
 from asyncpg.pool import Pool
 from datetime import datetime
@@ -251,6 +252,21 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • После 3 подтверждений сети товар будет отправлен
 • При отмене или истечении времени - +1 неудачная попытка
 • 3 неудачные попытки - бан на 24 часа''',
+                'purchase_invoice': '''💳 Оплата заказа
+
+📦 Товар: {product}
+📝 Адрес для оплаты: `{crypto_address}`
+💎 Сумма к оплате: {crypto_amount} LTC
+💰 Сумма в USD: ${amount}
+
+⏱ Действительно до: {expires_time}
+❗️ Осталось времени: {time_left}
+
+⚠️ Важно:
+• Отправьте точную сумму на указанный адрес
+• После 3 подтверждений сети товар будет отправлен
+• При отмене или истечении времени - +1 неудачная попытка
+• 3 неудачные попытки - бан на 24 часа''',
                 'invoice_time_left': '⏱ До отмены инвойса осталось: {time_left}',
                 'invoice_cancelled': '❌ Инвойс отменен. Неудачных попыток: {failed_count}/3',
                 'invoice_expired': '⏰ Время инвойса истекло. Неудачных попыток: {failed_count}/3',
@@ -304,6 +320,21 @@ Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბა�
 • After the time expires, the address is released''',
                 'active_invoice': '''💳 Active Invoice
 
+📝 Payment address: `{crypto_address}`
+💎 Amount to pay: {crypto_amount} LTC
+💰 Amount in USD: ${amount}
+
+⏱ Valid until: {expires_time}
+❗️ Time left: {time_left}
+
+⚠️ Important:
+• Send the exact amount to the specified address
+• After 3 network confirmations the product will be sent
+• On cancellation or timeout - +1 failed attempt
+• 3 failed attempts - 24 hour ban''',
+                'purchase_invoice': '''💳 Order Payment
+
+📦 Product: {product}
 📝 Payment address: `{crypto_address}`
 💎 Amount to pay: {crypto_amount} LTC
 💰 Amount in USD: ${amount}
@@ -381,8 +412,23 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
+                'purchase_invoice': '''💳 შეკვეთის გადახდა
+
+📦 პროდუქტი: {product}
+📝 გადახდის მისამართი: `{crypto_address}`
+💎 გადასახდელი რაოდენობა: {crypto_amount} LTC
+💰 რაოდენობა USD-ში: ${amount}
+
+⏱ მოქმედებს: {expires_time}
+❗️ დარჩენილი დრო: {time_left}
+
+⚠️ მნიშვნელოვანი:
+• გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
+• 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
+• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
+• 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
-                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუ�მატებელი მცდელობები: {failed_count}/3',
+                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
                 'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
                 'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!'
             }

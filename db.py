@@ -66,20 +66,24 @@ async def init_db(database_url):
                 invoice_uuid TEXT,
                 crypto_address TEXT,
                 crypto_amount REAL,
+                product_id INTEGER,
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
             ''')
             
             # Проверяем существование столбцов и добавляем их, если нет
             columns_to_check = [
-                'invoice_uuid', 'crypto_address', 'crypto_amount'
+                'invoice_uuid', 'crypto_address', 'crypto_amount', 'product_id'
             ]
             
             for column in columns_to_check:
                 try:
                     await conn.execute(f"SELECT {column} FROM transactions LIMIT 1")
                 except Exception:
-                    await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} TEXT')
+                    if column == 'product_id':
+                        await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} INTEGER')
+                    else:
+                        await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} TEXT')
                     logger.info(f"Added {column} column to transactions table")
             
             # Таблица покупки
@@ -93,9 +97,21 @@ async def init_db(database_url):
                 delivery_type TEXT,
                 purchase_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status TEXT DEFAULT 'completed',
+                product_id INTEGER,
+                image_url TEXT,
+                description TEXT,
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
             ''')
+            
+            # Проверяем и добавляем недостающие колонки в purchases
+            purchase_columns_to_check = ['product_id', 'image_url', 'description']
+            for column in purchase_columns_to_check:
+                try:
+                    await conn.execute(f"SELECT {column} FROM purchases LIMIT 1")
+                except Exception:
+                    await conn.execute(f'ALTER TABLE purchases ADD COLUMN {column} TEXT')
+                    logger.info(f"Added {column} column to purchases table")
             
             # Новая таблида для текстов
             await conn.execute('''
@@ -156,10 +172,18 @@ async def init_db(database_url):
                 city_id INTEGER REFERENCES cities(id),
                 district_id INTEGER REFERENCES districts(id),
                 delivery_type_id INTEGER REFERENCES delivery_types(id),
+                quantity INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
+            
+            # Проверяем и добавляем колонку quantity в products
+            try:
+                await conn.execute("SELECT quantity FROM products LIMIT 1")
+            except Exception:
+                await conn.execute('ALTER TABLE products ADD COLUMN quantity INTEGER DEFAULT 1')
+                logger.info("Added quantity column to products table")
             
             # Таблица проданных товаров
             await conn.execute('''
@@ -296,7 +320,10 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                 'invoice_time_left': '⏱ До отмены инвойса осталось: {time_left}',
                 'invoice_cancelled': '❌ Инвойс отменен. Неудачных попыток: {failed_count}/3',
                 'invoice_expired': '⏰ Время инвойса истекло. Неудачных попыток: {failed_count}/3',
-                'almost_banned': '⚠️ Внимание! После еще {remaining} неудачных попыток вы будете забанены на 24 часа!'
+                'almost_banned': '⚠️ Внимание! После еще {remaining} неудачных попыток вы будете забанены на 24 часа!',
+                'product_out_of_stock': '❌ Товар временно отсутствует',
+                'product_reserved': '✅ Товар забронирован',
+                'product_released': '✅ Товар возвращен в продажу'
             },
             'en': {
                 'welcome': 'Welcome!',
@@ -376,7 +403,10 @@ Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბა�
                 'invoice_time_left': '⏱ Time until invoice cancellation: {time_left}',
                 'invoice_cancelled': '❌ Invoice cancelled. Failed attempts: {failed_count}/3',
                 'invoice_expired': '⏰ Invoice expired. Failed attempts: {failed_count}/3',
-                'almost_banned': '⚠️ Warning! After {remaining} more failed attempts you will be banned for 24 hours!'
+                'almost_banned': '⚠️ Warning! After {remaining} more failed attempts you will be banned for 24 hours!',
+                'product_out_of_stock': '❌ Product temporarily out of stock',
+                'product_reserved': '✅ Product reserved',
+                'product_released': '✅ Product returned to stock'
             },
             'ka': {
                 'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
@@ -455,8 +485,11 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
-                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
-                'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!'
+                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუ�муტებელი მცდელობები: {failed_count}/3',
+                'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
+                'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
+                'product_reserved': '✅ პროდუქტი დაჯავშნულია',
+                'product_released': '✅ პროდუქტი დაბრუნდა მარაგში'
             }
         }
         
@@ -511,15 +544,15 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                 # Добавляем товары для каждого города
                 if city == 'Тбилиси':
                     products = [
-                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
-                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
-                        ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
-                        ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 'Амфетамин', 'Центр', 'Подъезд')
+                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд', 10),
+                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд', 5),
+                        ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 'Мефедрон', 'Центр', 'Подъезд', 3),
+                        ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 'Амфетамин', 'Центр', 'Подъезд', 8)
                     ]
                 else:
                     products = [
-                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд'),
-                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд')
+                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд', 5),
+                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд', 3)
                     ]
                     
                 # Получаем ID категорий, районов и типов доставки
@@ -539,7 +572,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                     delivery_types_dict[row['name']] = row['id']
                     
                 # Добавляем товары
-                for product_name, description, price, image_url, category_name, district_name, delivery_type_name in products:
+                for product_name, description, price, image_url, category_name, district_name, delivery_type_name, quantity in products:
                     category_id = categories_dict.get(category_name)
                     district_id = districts_dict.get(district_name)
                     delivery_type_id = delivery_types_dict.get(delivery_type_name)
@@ -547,10 +580,10 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                     if category_id and district_id and delivery_type_id:
                         product_uuid = str(uuid.uuid4())
                         await conn.execute('''
-                        INSERT INTO products (uuid, name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        INSERT INTO products (uuid, name, description, price, image_url, category_id, city_id, district_id, delivery_type_id, quantity)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         ON CONFLICT (uuid) DO NOTHING
-                        ''', product_uuid, product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id)
+                        ''', product_uuid, product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id, quantity)
         
         logger.info("Default data initialized successfully")
     except Exception as e:
@@ -588,7 +621,7 @@ async def load_cache():
             products_cache = {}
             for city in cities_cache:
                 products = await conn.fetch('''
-                    SELECT p.name, p.description, p.price, p.image_url, c.name as category_name
+                    SELECT p.id, p.name, p.description, p.price, p.image_url, p.quantity, c.name as category_name
                     FROM products p 
                     LEFT JOIN categories c ON p.category_id = c.id
                     WHERE p.city_id = $1 
@@ -596,10 +629,12 @@ async def load_cache():
                 ''', city['id'])
                 products_cache[city['name']] = {
                     product['name']: {
+                        'id': product['id'],
                         'description': product['description'],
                         'price': product['price'], 
                         'image': product['image_url'],
-                        'category': product['category_name']
+                        'category': product['category_name'],
+                        'quantity': product['quantity']
                     } for product in products
                 }
             
@@ -670,25 +705,25 @@ async def update_user(user_id, **kwargs):
     except Exception as e:
         logger.error(f"Error updating user {user_id}: {e}")
 
-async def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address=None, crypto_amount=None):
+async def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address=None, crypto_amount=None, product_id=None):
     try:
         async with db_pool.acquire() as conn:
             await conn.execute('''
-            INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount)
+            INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount, product_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount, product_id)
     except Exception as e:
         logger.error(f"Error adding transaction for user {user_id}: {e}")
 
-async def add_purchase(user_id, product, price, district, delivery_type):
+async def add_purchase(user_id, product, price, district, delivery_type, product_id=None, image_url=None, description=None):
     try:
         async with db_pool.acquire() as conn:
             # Атомарное обновление счетчика покупок и возврат ID покупки
             purchase_id = await conn.fetchval('''
-            INSERT INTO purchases (user_id, product, price, district, delivery_type)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO purchases (user_id, product, price, district, delivery_type, product_id, image_url, description)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
-            ''', user_id, product, price, district, delivery_type)
+            ''', user_id, product, price, district, delivery_type, product_id, image_url, description)
             
             # Обновляем счетчик покупок пользователя
             await conn.execute('''
@@ -850,3 +885,74 @@ async def update_dispute_status(dispute_id, status):
             ''', status, dispute_id)
     except Exception as e:
         logger.error(f"Error updating dispute status: {e}")
+
+# Функции для работы с количеством товаров
+async def get_product_quantity(product_id):
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchval('SELECT quantity FROM products WHERE id = $1', product_id)
+    except Exception as e:
+        logger.error(f"Error getting product quantity: {e}")
+        return 0
+
+async def reserve_product(product_id, quantity=1):
+    try:
+        async with db_pool.acquire() as conn:
+            result = await conn.execute('''
+                UPDATE products 
+                SET quantity = quantity - $1 
+                WHERE id = $2 AND quantity >= $1
+            ''', quantity, product_id)
+            
+            # Проверяем, была ли обновлена хотя бы одна строка
+            return "UPDATE 1" in str(result)
+    except Exception as e:
+        logger.error(f"Error reserving product: {e}")
+        return False
+
+async def release_product(product_id, quantity=1):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE products 
+                SET quantity = quantity + $1 
+                WHERE id = $2
+            ''', quantity, product_id)
+            return True
+    except Exception as e:
+        logger.error(f"Error releasing product: {e}")
+        return False
+
+async def get_product_by_name_city(product_name, city_name):
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchrow('''
+                SELECT p.* 
+                FROM products p
+                JOIN cities c ON p.city_id = c.id
+                WHERE p.name = $1 AND c.name = $2
+            ''', product_name, city_name)
+    except Exception as e:
+        logger.error(f"Error getting product: {e}")
+        return None
+
+async def get_product_by_id(product_id):
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchrow('SELECT * FROM products WHERE id = $1', product_id)
+    except Exception as e:
+        logger.error(f"Error getting product by ID: {e}")
+        return None
+
+async def get_purchase_with_product(purchase_id):
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchrow('''
+                SELECT p.*, pr.image_url, pr.description 
+                FROM purchases p
+                LEFT JOIN products pr ON p.product_id = pr.id
+                WHERE p.id = $1
+            ''', purchase_id)
+    except Exception as e:
+        logger.error(f"Error getting purchase with product: {e}")
+        return None

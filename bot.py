@@ -1,3 +1,4 @@
+# bot.py
 import logging
 import random
 import time
@@ -26,6 +27,7 @@ from db import (
     has_active_invoice
 )
 from ltc_hdwallet import ltc_wallet
+from api import get_ltc_usd_rate, check_ltc_transaction
 
 # Настройки логирования
 logging.basicConfig(
@@ -77,24 +79,6 @@ def singleton_check():
     except socket.error:
         logger.error("Another instance of the bot is already running!")
         return False
-
-# Функция для получения курса LTC с fallback значением
-async def get_ltc_usd_rate():
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get('https://api.binance.com/api/v3/ticker/price?symbol=LTCUSDT', timeout=10) as response:
-                data = await response.json()
-                if 'price' in data:
-                    return float(data['price'])
-                else:
-                    logger.warning("Binance API response missing 'price' field, using fallback price")
-                    return 117.0  # Fallback цена LTC
-    except asyncio.TimeoutError:
-        logger.warning("Timeout getting LTC rate, using fallback price")
-        return 117.0
-    except Exception as e:
-        logger.error(f"Error getting LTC rate: {e}, using fallback price")
-        return 117.0  # Fallback цена LTC при ошибке
 
 # Вспомогательная функция для удаления предыдущего сообщения
 async def delete_previous_message(chat_id: int, message_id: int):
@@ -206,7 +190,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 logger.error(f"Error in invoice notification loop: {e}")
                 await asyncio.sleep(60)
     
-    # Запускаем задачу и сохраняем ссылку для отмены
+    # Запускаем задачу и сохраняем ссылку для отменя
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -283,9 +267,16 @@ async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, 
             time_left = invoice['expires_at'] - datetime.now()
             time_left_str = f"{int(time_left.total_seconds() // 60)} мин {int(time_left.total_seconds() % 60)} сек"
             
+            # Определяем, это инвойс на покупку или пополнение
+            if "Пополнение баланса" in invoice['product_info']:
+                text_key = 'active_invoice'
+            else:
+                text_key = 'purchase_invoice'
+            
             payment_text = get_text(
                 lang, 
-                'active_invoice',
+                text_key,
+                product=invoice['product_info'],
                 crypto_address=invoice['crypto_address'],
                 crypto_amount=invoice['crypto_amount'],
                 amount=invoice['amount'],
@@ -962,16 +953,10 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             
             product_info = f"{product} в {city}, район {district}, {delivery_type}"
             
-            # Создаем заказ с LTC
             order_id = f"order_{int(time.time())}_{user_id}"
-            
-            # Получаем текущий курс LTC (теперь всегда возвращает число)
             ltc_rate = await get_ltc_usd_rate()
-            
-            # Конвертируем USD в LTC
             amount_ltc = price / ltc_rate
             
-            # Генерируем новый LTC адрес
             try:
                 address_data = ltc_wallet.generate_address()
             except Exception as e:
@@ -979,10 +964,9 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                 await callback.message.answer(get_text(lang, 'error'))
                 return
             
-            # Создаем QR-код
             qr_code = ltc_wallet.get_qr_code(address_data['address'], amount_ltc)
-            
             expires_at = datetime.now() + timedelta(minutes=30)
+            
             await add_transaction(
                 user_id,
                 price,
@@ -991,31 +975,49 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                 qr_code,
                 expires_at,
                 product_info,
-                order_id,  # Используем order_id как invoice_uuid
+                order_id,
                 address_data['address'],
-                str(amount_ltc)  # Конвертируем float в string
+                amount_ltc
             )
+            
+            # Новый формат текста для покупки
+            expires_time = expires_at.strftime("%d.%m.%Y, %H:%M:%S")
+            time_left = expires_at - datetime.now()
+            time_left_str = f"{int(time_left.total_seconds() // 60)} мин {int(time_left.total_seconds() % 60)} сек"
             
             payment_text = get_text(
                 lang,
-                'payment_instructions',
-                amount=round(amount_ltc, 8),
-                currency='LTC',
-                payment_address=address_data['address']
+                'purchase_invoice',
+                product=product,
+                crypto_address=address_data['address'],
+                crypto_amount=round(amount_ltc, 8),
+                amount=price,
+                expires_time=expires_time,
+                time_left=time_left_str
+            )
+            
+            builder = InlineKeyboardBuilder()
+            builder.row(
+                InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_invoice"),
+                InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_invoice")
             )
             
             try:
                 await callback.message.answer_photo(
                     photo=qr_code,
-                    caption=payment_text
+                    caption=payment_text,
+                    reply_markup=builder.as_markup(),
+                    parse_mode='Markdown'
                 )
             except Exception as e:
                 logger.error(f"Error sending QR code: {e}")
-                await callback.message.answer(text=payment_text)
+                await callback.message.answer(
+                    text=payment_text,
+                    reply_markup=builder.as_markup(),
+                    parse_mode='Markdown'
+                )
             
-            # Запускаем уведомления для этого инвойса
             asyncio.create_task(invoice_notification_loop(user_id, order_id, lang))
-            
             await state.set_state(Form.payment)
         else:
             await callback.message.answer("Currently only LTC is supported")
@@ -1067,23 +1069,23 @@ async def process_balance(message: types.Message, state: FSMContext):
                 f"Пополнение баланса на {amount}$",
                 order_id,
                 address_data['address'],
-                str(amount_ltc)  # Конвертируем float в string
+                amount_ltc
             )
             
             # Форматируем время истечения
             expires_str = expires_at.strftime("%d.%m.%Y, %H:%M:%S")
+            time_left = expires_at - datetime.now()
+            time_left_str = f"{int(time_left.total_seconds() // 60)} мин {int(time_left.total_seconds() % 60)} сек"
             
-            payment_text = f"""💳 Пополнение баланса
-
-📝 Адрес для пополнения: `{address_data['address']}`
-
-⏱ Действительно до: {expires_str}
-
-❗️ Важно:
-• Отправьте {round(amount_ltc, 8)} LTC на указанный адрес
-• Все пополнения на этот адрес будут зачислены на ваш баланс
-• После истечения времени адрес освобождается
-• Для удобства используйте QR код выше"""
+            payment_text = get_text(
+                lang,
+                'active_invoice',
+                crypto_address=address_data['address'],
+                crypto_amount=round(amount_ltc, 8),
+                amount=amount,
+                expires_time=expires_str,
+                time_left=time_left_str
+            )
             
             builder = InlineKeyboardBuilder()
             builder.row(
@@ -1121,8 +1123,63 @@ async def process_balance(message: types.Message, state: FSMContext):
 async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
     try:
         await callback.answer("Проверка оплаты... Пожалуйста, подождите")
-        # Заглушка для проверки платежа
-        await callback.message.answer("Функция проверки находится в разработке")
+        
+        user_id = callback.from_user.id
+        user_data = await get_user(user_id)
+        lang = user_data['language'] or 'ru'
+        
+        async with db_pool.acquire() as conn:
+            invoice = await conn.fetchrow(
+                "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending'",
+                user_id
+            )
+        
+        if invoice:
+            # Используем API для проверки транзакции
+            is_paid = await check_ltc_transaction(
+                invoice['crypto_address'],
+                float(invoice['crypto_amount'])
+            )
+            
+            if is_paid:
+                await update_transaction_status(invoice['order_id'], 'completed')
+                await callback.message.answer("✅ Оплата подтверждена! Товар будет отправлен.")
+                
+                # Если это покупка, добавляем в историю
+                if "Пополнение баланса" not in invoice['product_info']:
+                    # Извлекаем информацию о покупке из product_info
+                    # Формат: "Товар в городе, район район, тип доставки"
+                    parts = invoice['product_info'].split(', ')
+                    if len(parts) >= 3:
+                        product = parts[0]
+                        district = parts[1].replace('район ', '')
+                        delivery_type = parts[2]
+                        
+                        await add_purchase(
+                            user_id,
+                            product,
+                            invoice['amount'],
+                            district,
+                            delivery_type
+                        )
+                
+                # Если это пополнение баланса, обновляем баланс
+                else:
+                    async with db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                            invoice['amount'], user_id
+                        )
+                        await callback.message.answer(
+                            get_text(lang, 'balance_add_success', 
+                                    amount=invoice['amount'], 
+                                    balance=user_data['balance'] + invoice['amount'])
+                        )
+            else:
+                await callback.message.answer("❌ Оплата еще не получена")
+        else:
+            await callback.message.answer("❌ Активный инвойс не найден")
+            
     except Exception as e:
         logger.error(f"Error checking invoice: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже.")

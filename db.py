@@ -467,7 +467,7 @@ Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბა�
 ეს არის ტელეგრამ ბოტი სწრაფი შესყიდვებისთვის. 🛒 ასევე არის ოფიციალური Mega მაღაზია, დააჭირეთ გადასვლას და აირჩიეთ უზარმაზარი ასორტიმენტიდან! 🪏
 
 ❗️ ჩვენ ვიცავთ ჩვენი კლიენტების სრულ კონფიდენციალურობას. ღორის პოლიციელები! 🤙🏼💪''',
-                'balance_instructions': '''თქვენი ბალანსი: {balance}$
+                                'balance_instructions': '''თქვენი ბალანსი: {balance}$
 
 ბალანსის შევსების ინსტრუქცია:
 Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
@@ -507,12 +507,12 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ⚠️ მნიშვნელოვანი:
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
-• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუ�муატებელი მცდელობა
+• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
-                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუ�муატებელი მცდელობები: {failed_count}/3',
-                'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
+                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
+                'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუ�муატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
                 'product_reserved': '✅ პროდუქტი დაჯავშნულია',
                 'product_released': '✅ პროდუქტი დაბრუნდა მარაგში'
@@ -558,7 +558,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
             INSERT INTO explorer_api_stats (explorer_name, total_requests, successful_requests, daily_limit, remaining_daily_requests)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (explorer_name) DO NOTHING
-            ''', api, 0, 0, API_REAL_LIMITS.get(api, {}).get('requests_per_day', 1000), API_REAL_LIMITS.get(api, {}).get('requests_per_day', 1000))
+            ''', api, 0, 0, 1000, 1000)
         
         # Проверяем и добавляем города
         cities_count = await conn.fetchval('SELECT COUNT(*) FROM cities')
@@ -856,6 +856,18 @@ async def get_last_order(user_id):
         logger.error(f"Error getting last order for user {user_id}: {e}")
         return None
 
+# Функция для получения истории заказов пользователя
+async def get_user_orders(user_id, limit=10):
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetch(
+                'SELECT * FROM purchases WHERE user_id = $1 ORDER BY purchase_time DESC LIMIT $2',
+                user_id, limit
+            )
+    except Exception as e:
+        logger.error(f"Error getting user orders: {e}")
+        return []
+
 # Функция для проверки бана пользователя
 async def is_banned(user_id):
     try:
@@ -1108,14 +1120,6 @@ async def update_api_limits(explorer_name, daily_limit):
                     updated_at = NOW()
                 WHERE explorer_name = $2
             ''', daily_limit, explorer_name)
-            
-            # Обновляем кэш
-            if explorer_name in SYSTEM_STATUS.get('api_services', {}):
-                SYSTEM_STATUS['api_services'][explorer_name]['daily_limit'] = daily_limit
-                SYSTEM_STATUS['api_services'][explorer_name]['remaining_requests'] = min(
-                    SYSTEM_STATUS['api_services'][explorer_name]['remaining_requests'],
-                    daily_limit
-                )
         
         return True
     except Exception as e:
@@ -1132,11 +1136,6 @@ async def reset_daily_limits():
                     last_reset = NOW()
                 WHERE last_reset < CURRENT_DATE OR last_reset IS NULL
             ''')
-            
-            # Обновляем кэш
-            for service_name in SYSTEM_STATUS.get('api_services', {}):
-                service_data = SYSTEM_STATUS['api_services'][service_name]
-                service_data['remaining_requests'] = service_data['daily_limit']
         
         logging.info("Daily API limits reset successfully")
         return True
@@ -1178,4 +1177,36 @@ async def update_api_config(key, value):
         return True
     except Exception as e:
         logging.error(f"Error updating API config: {e}")
+        return False
+
+# Функции для проверки доступности районов и типов доставки
+async def is_district_available(city_name, district_name):
+    try:
+        async with db_pool.acquire() as conn:
+            # Проверяем есть ли доступные товары в этом районе
+            count = await conn.fetchval('''
+                SELECT COUNT(*) 
+                FROM products p
+                JOIN cities c ON p.city_id = c.id
+                JOIN districts d ON p.district_id = d.id
+                WHERE c.name = $1 AND d.name = $2 AND p.quantity > 0
+            ''', city_name, district_name)
+            return count > 0
+    except Exception as e:
+        logger.error(f"Error checking district availability: {e}")
+        return False
+
+async def is_delivery_type_available(delivery_type_name):
+    try:
+        async with db_pool.acquire() as conn:
+            # Проверяем есть ли доступные товары с этим типом доставки
+            count = await conn.fetchval('''
+                SELECT COUNT(*) 
+                FROM products p
+                JOIN delivery_types dt ON p.delivery_type_id = dt.id
+                WHERE dt.name = $1 AND p.quantity > 0
+            ''', delivery_type_name)
+            return count > 0
+    except Exception as e:
+        logger.error(f"Error checking delivery type availability: {e}")
         return False

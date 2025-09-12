@@ -14,7 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
-from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramBadRequest
+from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramBadRequest, TelegramNetworkError
 import aiohttp
 import traceback
 
@@ -66,7 +66,7 @@ class Form(StatesGroup):
     topup_currency = State()
 
 # Глобальные переменные
-bot = Bot(token=TOKEN)
+bot = Bot(token=TOKEN, timeout=30)  # Увеличенный таймаут
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 db_pool = None
@@ -433,7 +433,7 @@ async def process_successful_payment(transaction):
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         
-        # Если это покупка, добавляем в историю
+        # Если это покупка, добавляем в истории
         if "Пополнение баланса" not in transaction['product_info']:
             # Извлекаем информацию о покупке из product_info
             # Формат: "Товар в городе, район район, тип доставки"
@@ -1235,7 +1235,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
                 get_text(lang, 'select_crypto'),
                 builder.as_markup(),
                 get_bot_setting('confirmation_menu_image'),
-                state
+            state
             )
             await state.set_state(Form.crypto_currency)
         else:
@@ -1656,12 +1656,12 @@ async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
             
             if is_paid:
                 await update_transaction_status(invoice['order_id'], 'completed')
-                await callback.message.answer("✅ Оплата подтверждена! Товар будет отправлен.")
+                await callback.message.answer("✅ Оплата подтверждена! Транзакция обрабатывается.")
                 
                 # Обрабатываем успешную оплату
                 await process_successful_payment(invoice)
             else:
-                await callback.message.answer("❌ Оплата еще не получена")
+                await callback.message.answer("❌ Оплата еще не получена. Попробуйте позже.")
         else:
             await callback.message.answer("❌ Активный инвойс не найден")
             
@@ -1799,8 +1799,18 @@ async def main():
     global db_pool
     
     try:
-        # Удаляем вебхук перед запуском поллинга
-        await bot.delete_webhook(drop_pending_updates=True)
+        # Увеличиваем количество повторных попыток для удаления вебхука
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                await bot.delete_webhook(drop_pending_updates=True)
+                break
+            except (TelegramNetworkError, asyncio.TimeoutError) as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning(f"Attempt {attempt + 1}/{max_retries} failed to delete webhook: {e}")
+                await asyncio.sleep(5)
+        
         await asyncio.sleep(1)
         
         # Инициализируем базу данных
@@ -1825,6 +1835,9 @@ async def main():
             except TelegramRetryAfter as e:
                 logger.error(f"Rate limit exceeded. Waiting {e.retry_after} seconds...")
                 await asyncio.sleep(e.retry_after)
+            except asyncio.CancelledError:
+                logger.info("Bot task was cancelled")
+                break
             except Exception as e:
                 logger.error(f"Unexpected error: {e}. Restarting in 5 seconds...")
                 logger.error(traceback.format_exc())

@@ -22,11 +22,12 @@ from db import (
     init_db, get_user, update_user, add_transaction, add_purchase, 
     get_pending_transactions, update_transaction_status, update_transaction_status_by_uuid, 
     get_last_order, is_banned, get_text, 
-    load_cache,
+    load_cache, get_user_orders,
     get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache, get_categories_cache,
     has_active_invoice, add_sold_product, get_product_quantity, reserve_product, release_product,
     get_product_by_name_city, get_product_by_id, get_purchase_with_product,
-    get_api_limits, increment_api_request, reset_api_limits
+    get_api_limits, increment_api_request, reset_api_limits,
+    is_district_available, is_delivery_type_available
 )
 from ltc_hdwallet import ltc_wallet
 from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats
@@ -618,7 +619,7 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
             builder.row(InlineKeyboardButton(text=city['name'], callback_data=f"city_{city['name']}"))
         builder.row(
             InlineKeyboardButton(text=f"💰 {get_text(lang, 'balance', balance=user['balance'] or 0)}", callback_data="balance"),
-            InlineKeyboardButton(text="📦 Последний заказ", callback_data="last_order")
+            InlineKeyboardButton(text="📦 История заказов", callback_data="order_history")
         )
         
         # Добавляем кнопки с ссылками
@@ -697,35 +698,8 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         elif data == 'balance':
             await show_balance_menu(callback, state)
             await state.set_state(Form.balance_menu)
-        elif data == 'last_order':
-            last_order = await get_last_order(user_id)
-            if last_order:
-                order_text = (
-                    f"📦 Товар: {last_order['product']}\n"
-                    f"💵 Стоимость: {last_order['price']}$\n"
-                    f"🏙 Район: {last_order['district']}\n"
-                    f"🚚 Тип доставки: {last_order['delivery_type']}\n"
-                    f"🕐 Время заказа: {last_order['purchase_time']}\n"
-                    f"📊 Статус: {last_order['status']}"
-                )
-                
-                # Добавляем кнопку для просмотра товара, если есть product_id
-                builder = InlineKeyboardBuilder()
-                if last_order.get('product_id'):
-                    builder.row(InlineKeyboardButton(
-                        text="👀 Посмотреть товар", 
-                        callback_data=f"view_product_{last_order['id']}"
-                    ))
-                
-                sent_message = await callback.message.answer(
-                    text=order_text,
-                    reply_markup=builder.as_markup() if builder.buttons else None
-                )
-            else:
-                sent_message = await callback.message.answer(
-                    text=get_text(lang, 'no_orders')
-                )
-            await state.update_data(last_message_id=sent_message.message_id)
+        elif data == 'order_history':
+            await show_order_history(callback, state)
         elif data == 'bonuses':
             sent_message = await callback.message.answer(
                 text=get_text(lang, 'bonuses')
@@ -742,7 +716,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             await callback.message.answer("Переходим в канал...")
         elif data == 'reviews':
             # Открываем ссылку на отзывы
-            await callback.message.answer("Переходим к отзывам...")
+            await callback.message.answer("Переходим к отзываы...")
         elif data == 'website':
             # Открываем ссылку на сайт
             await callback.message.answer("Переходим на сайт...")
@@ -756,32 +730,126 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         logger.error(f"Error processing main menu: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
-@dp.callback_query(F.data.startswith("view_product_"))
-async def view_product_handler(callback: types.CallbackQuery, state: FSMContext):
+# Новая функция для отображения истории заказов
+@dp.callback_query(F.data == "order_history")
+async def show_order_history(callback: types.CallbackQuery, state: FSMContext):
     try:
-        purchase_id = int(callback.data.replace("view_product_", ""))
+        user_id = callback.from_user.id
+        user_data = await get_user(user_id)
+        lang = user_data['language'] or 'ru'
         
-        # Получаем информацию о покупке
-        purchase = await get_purchase_with_product(purchase_id)
+        # Получаем историю заказов
+        orders = await get_user_orders(user_id, 15)  # Ограничим 15 последними заказами
         
-        if purchase:
-            # Если есть информация о товаре (image_url и description), показываем
-            if purchase.get('image_url'):
-                caption = f"{purchase['product']}\n\n{purchase.get('description', '')}\n\nЦена: ${purchase['price']}"
-                await callback.message.answer_photo(
-                    photo=purchase['image_url'],
-                    caption=caption
-                )
-            else:
-                # Если нет фото, отправляем текст с описанием
-                product_info = f"{purchase['product']}\n\n{purchase.get('description', '')}\n\nЦена: ${purchase['price']}"
-                await callback.message.answer(product_info)
-        else:
-            await callback.answer("Информация о заказе не найдена")
+        if not orders:
+            await callback.answer(get_text(lang, 'no_orders'))
+            return
             
+        builder = InlineKeyboardBuilder()
+        
+        # Создаем кнопки для каждого заказа
+        for order in orders:
+            # Форматируем дату и время
+            order_time = order['purchase_time'].strftime("%d.%m %H:%M")
+            
+            # Сокращаем название товара если слишком длинное
+            product_name = order['product']
+            if len(product_name) > 15:
+                product_name = product_name[:12] + "..."
+            
+            # Формируем текст кнопки
+            btn_text = f"{order_time} - {product_name} - {order['price']}$"
+            
+            builder.row(InlineKeyboardButton(
+                text=btn_text, 
+                callback_data=f"view_order_{order['id']}"
+            ))
+        
+        # Добавляем кнопку возврата
+        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+        
+        # Удаляем предыдущее сообщение если есть
+        state_data = await state.get_data()
+        if 'last_message_id' in state_data:
+            await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
+        
+        # Отправляем сообщение с кнопками заказов
+        sent_message = await callback.message.answer(
+            text="📋 История ваших заказов:",
+            reply_markup=builder.as_markup()
+        )
+        
+        await state.update_data(last_message_id=sent_message.message_id)
         await callback.answer()
+        
     except Exception as e:
-        logger.error(f"Error in view product handler: {e}")
+        logger.error(f"Error showing order history: {e}")
+        await callback.answer("Произошла ошибка. Попробуйте позже.")
+
+# Обработчик для просмотра деталей заказа
+@dp.callback_query(F.data.startswith("view_order_"))
+async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        order_id = int(callback.data.replace("view_order_", ""))
+        
+        # Получаем информацию о заказе
+        order = await get_purchase_with_product(order_id)
+        
+        if not order:
+            await callback.answer("Заказ не найден")
+            return
+            
+        # Форматируем дату и время
+        order_time = order['purchase_time'].strftime("%d.%m.%Y %H:%M:%S")
+        
+        # Формируем текст с информацией о заказе
+        order_text = (
+            f"📦 <b>Товар:</b> {order['product']}\n"
+            f"💵 <b>Стоимость:</b> {order['price']}$\n"
+            f"🏙 <b>Район:</b> {order['district']}\n"
+            f"🚚 <b>Тип доставки:</b> {order['delivery_type']}\n"
+            f"🕐 <b>Время заказа:</b> {order_time}\n"
+            f"📊 <b>Статус:</b> {order['status']}"
+        )
+        
+        # Добавляем описание товара если есть
+        if order.get('description'):
+            order_text += f"\n\n📝 <b>Описание:</b>\n{order['description']}"
+        
+        # Создаем клавиатуру
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="⬅️ Назад к истории", callback_data="order_history"))
+        
+        # Если есть изображение товара, отправляем его
+        if order.get('image_url'):
+            # Удаляем предыдущее сообщение
+            state_data = await state.get_data()
+            if 'last_message_id' in state_data:
+                await safe_delete_previous_message(callback.message.chat.id, state_data['last_message_id'], state)
+            
+            sent_message = await callback.message.answer_photo(
+                photo=order['image_url'],
+                caption=order_text,
+                reply_markup=builder.as_markup(),
+                parse_mode='HTML'
+            )
+        else:
+            # Удаляем предыдущее сообщение
+            state_data = await state.get_data()
+            if 'last_message_id' in state_data:
+                await safe_delete_previous_message(callback.message.chat.id, state_data['last_message_id'], state)
+            
+            sent_message = await callback.message.answer(
+                text=order_text,
+                reply_markup=builder.as_markup(),
+                parse_mode='HTML'
+            )
+        
+        await state.update_data(last_message_id=sent_message.message_id)
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in view order handler: {e}")
         await callback.answer("Произошла ошибка")
 
 @dp.callback_query(Form.balance_menu)
@@ -859,10 +927,10 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
             await state.update_data(last_message_id=sent_message.message_id)
             return
         
-        # Фильтруем товары по категории
+        # Фильтруем товары по категории и наличию
         category_products = {}
         for product_name, product_info in products_cache[city].items():
-            if product_info['category'] == category:
+            if product_info['category'] == category and product_info.get('quantity', 1) > 0:
                 category_products[product_name] = product_info
         
         if not category_products:
@@ -950,9 +1018,18 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             await state.update_data(product=product_name)
             await state.update_data(price=product_info['price'])
             
-            # Получаем актуальные кэши
-            districts_cache = get_districts_cache()
-            districts = districts_cache.get(city, [])
+            # Получаем доступные районы для этого города
+            districts = []
+            for district in get_districts_cache().get(city, []):
+                if await is_district_available(city, district):
+                    districts.append(district)
+            
+            if not districts:
+                sent_message = await callback.message.answer(
+                    text="Нет доступных районов для этого города"
+                )
+                await state.update_data(last_message_id=sent_message.message_id)
+                return
             
             builder = InlineKeyboardBuilder()
             for district in districts:
@@ -972,11 +1049,21 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             district = data.replace('dist_', '')
             await state.update_data(district=district)
             
-            # Получаем актуальные кэши
-            delivery_types_cache = get_delivery_types_cache()
+            # Получаем доступные типы доставки
+            delivery_types = []
+            for del_type in get_delivery_types_cache():
+                if await is_delivery_type_available(del_type):
+                    delivery_types.append(del_type)
+            
+            if not delivery_types:
+                sent_message = await callback.message.answer(
+                    text="Нет доступных типов доставки"
+                )
+                await state.update_data(last_message_id=sent_message.message_id)
+                return
             
             builder = InlineKeyboardBuilder()
-            for del_type in delivery_types_cache:
+            for del_type in delivery_types:
                 builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
             
@@ -1011,9 +1098,11 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
             city_data = await state.get_data()
             city = city_data.get('city')
             
-            # Получаем актуальные кэши
-            districts_cache = get_districts_cache()
-            districts = districts_cache.get(city, [])
+            # Получаем доступные районы для этого города
+            districts = []
+            for district in get_districts_cache().get(city, []):
+                if await is_district_available(city, district):
+                    districts.append(district)
             
             builder = InlineKeyboardBuilder()
             for district in districts:
@@ -1033,12 +1122,10 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         
         delivery_type = data.replace('del_', '')
         
-        # Получаем актуальные кэши
-        delivery_types_cache = get_delivery_types_cache()
-        
-        if delivery_type not in delivery_types_cache:
+        # Проверяем доступность типа доставки
+        if not await is_delivery_type_available(delivery_type):
             sent_message = await callback.message.answer(
-                text=get_text(lang, 'error')
+                text="Этот тип доставки временно недоступен"
             )
             await state.update_data(last_message_id=sent_message.message_id)
             return
@@ -1093,11 +1180,14 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
         
         if data == 'back_to_delivery':
-            # Получаем актуальные кэши
-            delivery_types_cache = get_delivery_types_cache()
+            # Получаем доступные типы доставки
+            delivery_types = []
+            for del_type in get_delivery_types_cache():
+                if await is_delivery_type_available(del_type):
+                    delivery_types.append(del_type)
             
             builder = InlineKeyboardBuilder()
-            for del_type in delivery_types_cache:
+            for del_type in delivery_types:
                 builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
             
@@ -1361,7 +1451,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                 product_id
             )
             
-            # Сохраняем product_id в state для использования после оплаты
+            # Сохраняем product_id в state для использования после оплата
             await state.update_data(product_id=product_id)
             
             # Новый формат текста для покупки

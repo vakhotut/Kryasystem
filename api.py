@@ -49,6 +49,9 @@ _blockcypher_key_index = 0
 _electrum_server_index = 0
 _key_rotation_lock = asyncio.Lock()
 
+# Импортируем функции для работы с API лимитами
+from db import increment_api_request, get_api_limits
+
 class ElectrumClient:
     """Клиент для работы с Electrum LTC сервером"""
     
@@ -180,8 +183,28 @@ class ElectrumClient:
             self.writer.close()
             await self.writer.wait_closed()
 
+async def check_api_limit(api_name):
+    """Проверяет лимиты API и возвращает True если можно сделать запрос"""
+    try:
+        api_limits = await get_api_limits()
+        for limit in api_limits:
+            if limit['api_name'] == api_name:
+                if limit['requests_count'] < limit['daily_limit']:
+                    await increment_api_request(api_name)
+                    return True
+                else:
+                    logger.warning(f"API limit exceeded for {api_name}")
+                    return False
+        return True
+    except Exception as e:
+        logger.error(f"Error checking API limit for {api_name}: {e}")
+        return True
+
 async def check_transaction_electrum(address: str, amount: float, testnet: bool = TESTNET) -> Optional[Dict[str, Any]]:
     """Проверка транзакции через Electrum LTC сервер"""
+    if not await check_api_limit('electrum'):
+        return None
+        
     client = ElectrumClient(testnet=testnet)
     try:
         if await client.connect():
@@ -220,6 +243,9 @@ async def check_transaction_electrum(address: str, amount: float, testnet: bool 
 
 async def get_binance_ltc_rate(symbol: str = 'LTCUSDT') -> Optional[float]:
     """Получение курса LTC от Binance API"""
+    if not await check_api_limit('binance'):
+        return None
+        
     try:
         async with aiohttp.ClientSession() as session:
             url = f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}'
@@ -238,6 +264,9 @@ async def get_binance_ltc_rate(symbol: str = 'LTCUSDT') -> Optional[float]:
 
 async def get_coingecko_ltc_rate(currency: str = 'usd') -> Optional[float]:
     """Получение курса LTC от CoinGecko API"""
+    if not await check_api_limit('coingecko'):
+        return None
+        
     try:
         async with aiohttp.ClientSession() as session:
             url = f'https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies={currency}'
@@ -260,6 +289,9 @@ async def get_coingecko_ltc_rate(currency: str = 'usd') -> Optional[float]:
 
 async def get_coinbase_ltc_rate(currency: str = 'USD') -> Optional[float]:
     """Получение курса LTC от Coinbase API"""
+    if not await check_api_limit('coinbase'):
+        return None
+        
     try:
         async with aiohttp.ClientSession() as session:
             url = f'https://api.coinbase.com/v2/prices/LTC-{currency}/spot'
@@ -276,6 +308,9 @@ async def get_coinbase_ltc_rate(currency: str = 'USD') -> Optional[float]:
 
 async def get_kraken_ltc_rate(currency: str = 'USD') -> Optional[float]:
     """Получение курса LTC от Kraken API"""
+    if not await check_api_limit('kraken'):
+        return None
+        
     try:
         async with aiohttp.ClientSession() as session:
             url = f'https://api.kraken.com/0/public/Ticker?pair=LTC{currency}'
@@ -297,6 +332,9 @@ async def get_tsanghi_ltc_rate() -> Optional[float]:
     Получение курса LTC от Tsanghi API
     Документация: https://blog.csdn.net/2401_83241598/article/details/140605132
     """
+    if not await check_api_limit('tsanghi'):
+        return None
+        
     try:
         async with aiohttp.ClientSession() as session:
             url = 'https://tsanghi.com/api/fin/crypto/realtime?token=demo&ticker=LTC/USD&exchange_code=Binance'
@@ -384,6 +422,9 @@ async def check_transaction_blockchair(address: str, amount: float, testnet: boo
         logger.info("Blockchair не поддерживает тестовую сеть LTC")
         return None
         
+    if not await check_api_limit('blockchair'):
+        return None
+        
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://api.blockchair.com/litecoin/dashboards/address/{address}"
@@ -406,6 +447,9 @@ async def check_transaction_blockchair(address: str, amount: float, testnet: boo
 
 async def check_transaction_sochain(address: str, amount: float, testnet: bool = TESTNET) -> Optional[Dict[str, Any]]:
     """Проверка транзакции через Sochain API"""
+    if not await check_api_limit('sochain'):
+        return None
+        
     try:
         async with aiohttp.ClientSession() as session:
             network = 'LTCTEST' if testnet else 'LTC'
@@ -435,6 +479,9 @@ async def get_next_nownodes_key() -> str:
 
 async def check_transaction_nownodes(address: str, amount: float, testnet: bool = TESTNET) -> Optional[Dict[str, Any]]:
     """Проверка транзакции через Nownodes API с ротацией ключей"""
+    if not await check_api_limit('nownodes'):
+        return None
+        
     try:
         api_key = await get_next_nownodes_key()
         async with aiohttp.ClientSession() as session:
@@ -477,6 +524,9 @@ async def check_transaction_blockcypher(address: str, amount: float, testnet: bo
     Проверка транзакции через BlockCypher API с ротацией ключей
     Документация: https://www.blockcypher.com/dev/ 
     """
+    if not await check_api_limit('blockcypher'):
+        return None
+        
     try:
         api_key = await get_next_blockcypher_key()
         async with aiohttp.ClientSession() as session:
@@ -647,4 +697,4 @@ def get_key_usage_stats() -> Dict[str, Any]:
         "electrum_current_index": _electrum_server_index,
         "cache_size": len(_address_cache),
         "rate_cache_size": len(_rate_cache)
-                                              }
+                }

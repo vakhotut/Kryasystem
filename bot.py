@@ -253,7 +253,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 logger.error(f"Error in invoice notification loop: {e}")
                 await asyncio.sleep(60)
     
-    # Запускаем задачу и сохраняем ссылку для отменя
+    # Запускаем задачу и сохраняем ссылку для отмены
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -637,7 +637,8 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         full_text = shop_description + user_info_text + referral_info
         
         builder = InlineKeyboardBuilder()
-        for city in cities_cache:
+        cities = get_cities_cache()  # Исправлено: используем функцию вместо прямой переменной
+        for city in cities:
             builder.row(InlineKeyboardButton(text=city['name'], callback_data=f"city_{city['name']}"))
         builder.row(
             InlineKeyboardButton(text=f"💰 {get_text(lang, 'balance', balance=user['balance'] or 0)}", callback_data="balance"),

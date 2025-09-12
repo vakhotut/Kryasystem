@@ -243,18 +243,9 @@ class LTCWallet:
         """Генерация QR-кода для адреса"""
         ltc_amount = f"?amount={amount}" if amount else ""
         
-        if QRCODE_AVAILABLE:
-            # Локальная генерация QR-кода
-            uri = f"litecoin:{address}{ltc_amount}"
-            img = qrcode.make(uri)
-            buf = io.BytesIO()
-            img.save(buf, format='PNG')
-            buf.seek(0)
-            # В реальном приложении нужно вернуть изображение подходящим способом
-            return f"data:image/png;base64,{buf.getvalue()}"
-        else:
-            # Использование внешнего сервиса как запасной вариант
-            return f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=litecoin:{address}{ltc_amount}"
+        # Всегда используем внешний сервис для генерации QR-кодов
+        # чтобы избежать проблем с портами и валидностью URL
+        return f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=litecoin:{address}{ltc_amount}"
 
     def health_check(self) -> Dict[str, Any]:
         """Проверка состояния кошелька"""

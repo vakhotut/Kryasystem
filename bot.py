@@ -25,10 +25,11 @@ from db import (
     load_cache,
     get_cities_cache, get_districts_cache, get_products_cache, get_delivery_types_cache, get_categories_cache,
     has_active_invoice, add_sold_product, get_product_quantity, reserve_product, release_product,
-    get_product_by_name_city, get_product_by_id, get_purchase_with_product
+    get_product_by_name_city, get_product_by_id, get_purchase_with_product,
+    get_api_limits, increment_api_request, reset_api_limits
 )
 from ltc_hdwallet import ltc_wallet
-from api import get_ltc_usd_rate, check_ltc_transaction
+from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats
 
 # Настройки логирования
 logging.basicConfig(
@@ -40,6 +41,12 @@ logger = logging.getLogger(__name__)
 # Настройки бота
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.environ.get('DATABASE_URL')
+ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
+
+# Глобальные переменные для управления временными интервалами
+LAST_RATE_UPDATE = 0
+RATE_UPDATE_INTERVAL = 3600  # 1 час
+TRANSACTION_CHECK_DELAY = 600  # 10 минут
 
 # Состояния разговора
 class Form(StatesGroup):
@@ -244,7 +251,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 logger.error(f"Error in invoice notification loop: {e}")
                 await asyncio.sleep(60)
     
-    # Запускаем задачу и сохраняем ссылку для отмены
+    # Запускаем задачу и сохраняем ссылку для отменя
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -367,17 +374,140 @@ async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, 
         logger.error(f"Error showing active invoice: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
+# Функция для получения курса LTC с кешированием на 1 час
+async def get_ltc_usd_rate_cached():
+    global LAST_RATE_UPDATE
+    current_time = time.time()
+    
+    # Если прошло больше часа, обновляем курс
+    if current_time - LAST_RATE_UPDATE > RATE_UPDATE_INTERVAL:
+        rate = await get_ltc_usd_rate()
+        LAST_RATE_UPDATE = current_time
+        return rate
+    
+    # Используем кешированный курс
+    from api import get_cached_rate
+    cached_rate, from_cache = await get_cached_rate()
+    if from_cache:
+        return cached_rate
+    
+    # Если кеш пуст, получаем новый курс
+    rate = await get_ltc_usd_rate()
+    LAST_RATE_UPDATE = current_time
+    return rate
+
 # Поток для проверки pending транзакций
 async def check_pending_transactions_loop():
     while True:
         try:
-            # В реальной реализации здесь нужно подключиться к LTC node
-            # или использовать explorer API для проверки баланса
-            # Это сложная задача, требующая отдельной реализации
-            await asyncio.sleep(300)  # Проверяем каждые 5 минут
+            # Получаем все pending транзакции
+            transactions = await get_pending_transactions()
+            
+            for transaction in transactions:
+                created_at = transaction['created_at']
+                # Проверяем, прошло ли 10 минут с момента создания
+                if (datetime.now() - created_at).total_seconds() >= TRANSACTION_CHECK_DELAY:
+                    # Проверяем транзакцию через API
+                    is_paid = await check_ltc_transaction(
+                        transaction['crypto_address'],
+                        float(transaction['crypto_amount'])
+                    )
+                    
+                    if is_paid:
+                        # Обновляем статус транзакции
+                        await update_transaction_status(transaction['order_id'], 'completed')
+                        
+                        # Обрабатываем успешную оплату
+                        await process_successful_payment(transaction)
+            
+            await asyncio.sleep(60)  # Проверяем каждую минуту
         except Exception as e:
             logger.error(f"Error in check_pending_transactions: {e}")
-            await asyncio.sleep(300)
+            await asyncio.sleep(60)
+
+# Функция для обработки успешной оплаты
+async def process_successful_payment(transaction):
+    try:
+        user_id = transaction['user_id']
+        user_data = await get_user(user_id)
+        lang = user_data['language'] or 'ru'
+        
+        # Если это покупка, добавляем в историю
+        if "Пополнение баланса" not in transaction['product_info']:
+            # Извлекаем информацию о покупке из product_info
+            # Формат: "Товар в городе, район район, тип доставки"
+            parts = transaction['product_info'].split(', ')
+            if len(parts) >= 3:
+                product = parts[0]
+                district = parts[1].replace('район ', '')
+                delivery_type = parts[2]
+                
+                # Получаем product_id из transaction
+                product_id = transaction.get('product_id')
+                
+                # Получаем информацию о товаре для сохранения в purchase
+                product_info = None
+                if product_id:
+                    product_info = await get_product_by_id(product_id)
+                
+                # Добавляем покупку
+                purchase_id = await add_purchase(
+                    user_id,
+                    product,
+                    transaction['amount'],
+                    district,
+                    delivery_type,
+                    product_id,
+                    product_info['image_url'] if product_info else None,
+                    product_info['description'] if product_info else None
+                )
+                
+                if purchase_id and product_id:
+                    # Добавляем запись о проданном товаре
+                    await add_sold_product(product_id, user_id, 1, transaction['amount'], purchase_id)
+                    
+                    # Получаем информацию о товаре для отправки
+                    if product_info:
+                        caption = f"{product_info['name']}\n\n{product_info['description']}\n\nЦена: ${transaction['amount']}"
+                        if product_info['image_url']:
+                            await bot.send_photo(
+                                chat_id=user_id,
+                                photo=product_info['image_url'],
+                                caption=caption
+                            )
+                        else:
+                            await bot.send_message(
+                                chat_id=user_id,
+                                text=caption
+                            )
+        
+        # Если это пополнение баланса, обновляем баланс
+        else:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                    transaction['amount'], user_id
+                )
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=get_text(lang, 'balance_add_success', 
+                            amount=transaction['amount'], 
+                            balance=user_data['balance'] + transaction['amount'])
+                )
+                
+    except Exception as e:
+        logger.error(f"Error processing successful payment: {e}")
+
+# Поток для сброса API лимитов
+async def reset_api_limits_loop():
+    while True:
+        try:
+            # Сбрасываем лимиты каждый день
+            await reset_api_limits()
+            await asyncio.sleep(86400)  # 24 часа
+        except Exception as e:
+            logger.error(f"Error resetting API limits: {e}")
+            await asyncio.sleep(3600)  # Повторяем через час при ошибке
 
 # Обработчики команд и состояний
 @dp.message(Command("start"))
@@ -1181,7 +1311,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             product_info = f"{product_name} в {city}, район {district}, {delivery_type}"
             
             order_id = f"order_{int(time.time())}_{user_id}"
-            ltc_rate = await get_ltc_usd_rate()
+            ltc_rate = await get_ltc_usd_rate_cached()
             amount_ltc = price / ltc_rate
             
             # Получаем product_id для добавления в sold_products после оплаты
@@ -1271,6 +1401,10 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                     parse_mode='Markdown'
                 )
             
+            # Запускаем отложенную проверку через 10 минут
+            await asyncio.sleep(TRANSACTION_CHECK_DELAY)
+            asyncio.create_task(check_invoice_after_delay(order_id, user_id, lang))
+            
             asyncio.create_task(invoice_notification_loop(user_id, order_id, lang))
             await state.set_state(Form.payment)
         else:
@@ -1278,6 +1412,38 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
     except Exception as e:
         logger.error(f"Error processing crypto currency: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
+
+# Функция для отложенной проверки инвойса
+async def check_invoice_after_delay(order_id, user_id, lang):
+    """Проверяет инвойс через 10 минут после создания"""
+    await asyncio.sleep(TRANSACTION_CHECK_DELAY)
+    
+    # Получаем информацию о транзакции
+    async with db_pool.acquire() as conn:
+        invoice = await conn.fetchrow(
+            "SELECT * FROM transactions WHERE order_id = $1",
+            order_id
+        )
+    
+    if invoice and invoice['status'] == 'pending':
+        # Проверяем оплату через API
+        is_paid = await check_ltc_transaction(
+            invoice['crypto_address'],
+            float(invoice['crypto_amount'])
+        )
+        
+        if is_paid:
+            await update_transaction_status(order_id, 'completed')
+            await process_successful_payment(invoice)
+        else:
+            # Если оплаты нет, отправляем уведомление пользователю
+            try:
+                await bot.send_message(
+                    user_id,
+                    "⏰ Время оплаты истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
+                )
+            except Exception as e:
+                logger.error(f"Error sending delay notification: {e}")
 
 @dp.message(Form.balance)
 async def process_balance(message: types.Message, state: FSMContext):
@@ -1293,8 +1459,8 @@ async def process_balance(message: types.Message, state: FSMContext):
                 await message.answer(get_text(lang, 'error'))
                 return
             
-            # Получаем текущий курс LTC (теперь всегда возвращает число)
-            ltc_rate = await get_ltc_usd_rate()
+            # Получаем текущий курс LTC с кешированием
+            ltc_rate = await get_ltc_usd_rate_cached()
             
             # Конвертируем USD в LTC
             amount_ltc = amount / ltc_rate
@@ -1365,6 +1531,9 @@ async def process_balance(message: types.Message, state: FSMContext):
                 
             # Запускаем уведомления для этого инвойса
             asyncio.create_task(invoice_notification_loop(user.id, order_id, lang))
+            
+            # Запускаем отложенную проверку через 10 минут
+            asyncio.create_task(check_invoice_after_delay(order_id, user.id, lang))
                 
         except ValueError:
             await message.answer(get_text(lang, 'error'))
@@ -1399,63 +1568,8 @@ async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
                 await update_transaction_status(invoice['order_id'], 'completed')
                 await callback.message.answer("✅ Оплата подтверждена! Товар будет отправлен.")
                 
-                # Если это покупка, добавляем в историю
-                if "Пополнение баланса" not in invoice['product_info']:
-                    # Извлекаем информацию о покупке из product_info
-                    # Формат: "Товар в городе, район район, тип доставки"
-                    parts = invoice['product_info'].split(', ')
-                    if len(parts) >= 3:
-                        product = parts[0]
-                        district = parts[1].replace('район ', '')
-                        delivery_type = parts[2]
-                        
-                        # Получаем product_id из invoice
-                        product_id = invoice.get('product_id')
-                        
-                        # Получаем информацию о товаре для сохранения в purchase
-                        product_info = None
-                        if product_id:
-                            product_info = await get_product_by_id(product_id)
-                        
-                        # Добавляем покупку
-                        purchase_id = await add_purchase(
-                            user_id,
-                            product,
-                            invoice['amount'],
-                            district,
-                            delivery_type,
-                            product_id,
-                            product_info['image_url'] if product_info else None,
-                            product_info['description'] if product_info else None
-                        )
-                        
-                        if purchase_id and product_id:
-                            # Добавляем запись о проданном товаре
-                            await add_sold_product(product_id, user_id, 1, invoice['amount'], purchase_id)
-                            
-                            # Получаем информацию о товаре для отправки
-                            if product_info:
-                                caption = f"{product_info['name']}\n\n{product_info['description']}\n\nЦена: ${invoice['amount']}"
-                                if product_info['image_url']:
-                                    await callback.message.answer_photo(
-                                        photo=product_info['image_url'],
-                                        caption=caption
-                                    )
-                                else:
-                                    await callback.message.answer(caption)
-                
-                # Если это пополнение баланса, обновляем баланс
-                else:
-                    async with db_pool.acquire() as conn:
-                        await conn.execute(
-                            "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                            invoice['amount'], user_id
-                        )
-                        await callback.message.answer(
-                            get_text(lang, 'balance_add_success', 
-                                    amount=invoice['amount'], 
-                                    balance=user_data['balance'] + invoice['amount'])
-                        )
+                # Обрабатываем успешную оплату
+                await process_successful_payment(invoice)
             else:
                 await callback.message.answer("❌ Оплата еще не получена")
         else:
@@ -1539,6 +1653,35 @@ async def cmd_menu(message: types.Message, state: FSMContext):
         logger.error(f"Error in menu command: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
+@dp.message(Command("api_status"))
+async def cmd_api_status(message: types.Message):
+    """Показывает статус API лимитов (только для администраторов)"""
+    try:
+        user_id = message.from_user.id
+        if user_id not in ADMIN_IDS:
+            await message.answer("❌ У вас нет прав для выполнения этой команды.")
+            return
+        
+        api_stats = await get_api_limits()
+        response = "📊 Статус API лимитов:\n\n"
+        
+        for stat in api_stats:
+            remaining = stat['daily_limit'] - stat['requests_count']
+            response += f"{stat['api_name']}: {stat['requests_count']}/{stat['daily_limit']} (осталось: {remaining})\n"
+        
+        # Добавляем информацию о ключах
+        key_stats = get_key_usage_stats()
+        response += f"\n🔑 Nownodes ключей: {key_stats['nownodes_keys_count']}\n"
+        response += f"🔑 BlockCypher ключей: {key_stats['blockcypher_keys_count']}\n"
+        response += f"🌐 Electrum серверов: {key_stats['electrum_servers_mainnet']} mainnet, {key_stats['electrum_servers_testnet']} testnet\n"
+        response += f"💾 Кеш адресов: {key_stats['cache_size']}\n"
+        response += f"💱 Кеш курсов: {key_stats['rate_cache_size']}"
+        
+        await message.answer(response)
+    except Exception as e:
+        logger.error(f"Error showing API status: {e}")
+        await message.answer("Ошибка при получении статуса API")
+
 @dp.message(F.text)
 async def handle_text(message: types.Message, state: FSMContext):
     try:
@@ -1578,6 +1721,9 @@ async def main():
         
         # Запускаем проверку pending транзакций в фоне
         asyncio.create_task(check_pending_transactions_loop())
+        
+        # Запускаем сброс API лимитов
+        asyncio.create_task(reset_api_limits_loop())
         
         # Запускаем бота с обработкой ошибок
         while True:

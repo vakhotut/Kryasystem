@@ -24,6 +24,7 @@ districts_cache = {}
 products_cache = {}
 delivery_types_cache = []
 categories_cache = []
+bot_settings_cache = {}
 
 # Инициализация базы данных
 async def init_db(database_url):
@@ -227,6 +228,15 @@ async def init_db(database_url):
                         await conn.execute(f'ALTER TABLE products ADD COLUMN {column} INTEGER REFERENCES {column.split("_")[0] + "s"}(id)')
                     logger.info(f"Added {column} column to products table")
             
+            # Таблица для настроек бота
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                id SERIAL PRIMARY KEY,
+                key TEXT UNIQUE NOT NULL,
+                value TEXT NOT NULL
+            )
+            ''')
+            
             # Заполняем таблицы начальными данными, если они пустые
             await init_default_data(conn)
             
@@ -252,7 +262,7 @@ async def init_default_data(conn):
                 'select_district': 'Выберите район:',
                 'select_delivery': 'Выберите тип доставки:',
                 'order_summary': "Информация о заказе:\n📦 Товар: {product}\n💵 Стоимость: {price}$\n🏙 Район: {district}\n🚚 Тип доставки: {delivery_type}\n\nВсё верно?",
-                'select_crypto': 'Выберите криптовалюту для оплаты:',
+                'select_crypto': 'Выберите криптовалюту для оплата:',
                 'payment_instructions': "Оплатите {amount} {currency} на адрес:\n`{payment_address}`\n\nОтсканируйте QR-код для оплаты:\nПосле подтверждения 3 сетевых подтверждений товар будет выслан автоматически.",
                 'payment_timeout': 'Время оплата истекло. Заказ отменен.',
                 'payment_success': 'Оплата получена! Ваш товар:\n\n{product_image}',
@@ -467,7 +477,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
-• 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
+• 3 წარუ�муატებელი მცდელობა - 24 საათიანი ბანი''',
                 'purchase_invoice': '''💳 შეკვეთის გადახდა
 
 📦 პროდუქტი: {product}
@@ -481,11 +491,11 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ⚠️ მნიშვნელოვანი:
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
-• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუ�муტებელი მცდელობა
+• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
-                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუ�муტებელი მცდელობები: {failed_count}/3',
+                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
                 'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
                 'product_reserved': '✅ პროდუქტი დაჯავშნულია',
@@ -500,6 +510,30 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                 VALUES ($1, $2, $3)
                 ON CONFLICT (lang, key) DO UPDATE SET value = EXCLUDED.value
                 ''', lang, key, value)
+        
+        # Добавляем настройки бота по умолчанию
+        default_settings = {
+            'main_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+            'balance_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+            'category_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+            'district_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+            'delivery_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+            'confirmation_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+            'rules_link': "https://t.me/your_rules",
+            'operator_link': "https://t.me/your_operator",
+            'support_link': "https://t.me/your_support",
+            'channel_link': "https://t.me/your_channel",
+            'reviews_link': "https://t.me/your_reviews",
+            'website_link': "https://yourwebsite.com",
+            'personal_bot_link': "https://t.me/your_bot"
+        }
+        
+        for key, value in default_settings.items():
+            await conn.execute('''
+            INSERT INTO bot_settings (key, value)
+            VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            ''', key, value)
         
         # Проверяем и добавляем города
         cities_count = await conn.fetchval('SELECT COUNT(*) FROM cities')
@@ -593,7 +627,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 
 # Функция для загрузки данных в кэш
 async def load_cache():
-    global texts_cache, cities_cache, districts_cache, products_cache, delivery_types_cache, categories_cache
+    global texts_cache, cities_cache, districts_cache, products_cache, delivery_types_cache, categories_cache, bot_settings_cache
     
     try:
         async with db_pool.acquire() as conn:
@@ -642,6 +676,10 @@ async def load_cache():
             delivery_types = await conn.fetch('SELECT * FROM delivery_types ORDER BY name')
             delivery_types_cache = [delivery_type['name'] for delivery_type in delivery_types]
             
+            # Загрузка настроек бота
+            settings_rows = await conn.fetch('SELECT * FROM bot_settings')
+            bot_settings_cache = {row['key']: row['value'] for row in settings_rows}
+            
         logger.info("Кэш успешно загружен")
     except Exception as e:
         logger.error(f"Ошибка загрузки кэша: {e}")
@@ -669,6 +707,14 @@ def get_text(lang, key, **kwargs):
     except Exception as e:
         logger.error(f"Error in get_text: {e}")
         return "Ошибка загрузки текста"
+
+# Функция для получения настройки бота
+def get_bot_setting(key):
+    try:
+        return bot_settings_cache.get(key, "")
+    except Exception as e:
+        logger.error(f"Error getting bot setting {key}: {e}")
+        return ""
 
 # Функции для работы с базой данных
 async def get_user(user_id):
@@ -725,7 +771,7 @@ async def add_purchase(user_id, product, price, district, delivery_type, product
             RETURNING id
             ''', user_id, product, price, district, delivery_type, product_id, image_url, description)
             
-            # Обновляем счетчик покупок пользователя
+            # Обновляем счетчик покупки пользователя
             await conn.execute('''
             UPDATE users SET purchase_count = purchase_count + 1 WHERE user_id = $1
             ''', user_id)
@@ -834,6 +880,9 @@ def get_categories_cache():
 
 def get_texts_cache():
     return texts_cache
+
+def get_bot_settings_cache():
+    return bot_settings_cache
 
 # Функции для работы с проданными товарами и disputes
 async def get_sold_products(page=1, per_page=20):
@@ -956,3 +1005,30 @@ async def get_purchase_with_product(purchase_id):
     except Exception as e:
         logger.error(f"Error getting purchase with product: {e}")
         return None
+
+# Функции для работы с настройками бота
+async def update_bot_setting(key, value):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO bot_settings (key, value)
+                VALUES ($1, $2)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            ''', key, value)
+            
+            # Обновляем кэш
+            bot_settings_cache[key] = value
+            
+        return True
+    except Exception as e:
+        logger.error(f"Error updating bot setting {key}: {e}")
+        return False
+
+async def get_all_bot_settings():
+    try:
+        async with db_pool.acquire() as conn:
+            settings = await conn.fetch('SELECT * FROM bot_settings')
+            return {row['key']: row['value'] for row in settings}
+    except Exception as e:
+        logger.error(f"Error getting all bot settings: {e}")
+        return {}

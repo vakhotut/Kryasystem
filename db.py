@@ -1,4 +1,3 @@
-# db.py
 import asyncpg
 from asyncpg.pool import Pool
 from datetime import datetime
@@ -196,18 +195,6 @@ async def init_db(database_url):
                 sold_price REAL NOT NULL,
                 sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 purchase_id INTEGER REFERENCES purchases(id)
-            )
-            ''')
-            
-            # Таблица товаров на рассмотрении возврата
-            await conn.execute('''
-            CREATE TABLE IF NOT EXISTS disputed_products (
-                id SERIAL PRIMARY KEY,
-                sold_product_id INTEGER REFERENCES sold_products(id),
-                reason TEXT,
-                status TEXT DEFAULT 'pending', -- pending, approved, rejected
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                resolved_at TIMESTAMP
             )
             ''')
             
@@ -477,7 +464,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
-• 3 წარუ�муატებელი მცდელობა - 24 საათიანი ბანი''',
+• 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'purchase_invoice': '''💳 შეკვეთის გადახდა
 
 📦 პროდუქტი: {product}
@@ -495,7 +482,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
-                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
+                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუ�муატებელი მცდელობები: {failed_count}/3',
                 'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
                 'product_reserved': '✅ პროდუქტი დაჯავშნულია',
@@ -784,22 +771,22 @@ async def add_purchase(user_id, product, price, district, delivery_type, product
 async def add_sold_product(product_id, user_id, quantity, sold_price, purchase_id):
     try:
         async with db_pool.acquire() as conn:
+            # Уменьшаем количество товара на складе
+            success = await reserve_product(product_id, quantity)
+            
+            if not success:
+                raise Exception("Недостаточно товара на складе")
+            
+            # Добавляем запись о проданном товаре
             await conn.execute('''
             INSERT INTO sold_products (product_id, user_id, quantity, sold_price, purchase_id)
             VALUES ($1, $2, $3, $4, $5)
             ''', product_id, user_id, quantity, sold_price, purchase_id)
+            
+            return True
     except Exception as e:
         logger.error(f"Error adding sold product for user {user_id}: {e}")
-
-async def add_disputed_product(sold_product_id, reason):
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute('''
-            INSERT INTO disputed_products (sold_product_id, reason)
-            VALUES ($1, $2)
-            ''', sold_product_id, reason)
-    except Exception as e:
-        logger.error(f"Error adding disputed product: {e}")
+        return False
 
 async def get_pending_transactions():
     try:
@@ -884,7 +871,7 @@ def get_texts_cache():
 def get_bot_settings_cache():
     return bot_settings_cache
 
-# Функции для работы с проданными товарами и disputes
+# Функции для работы с проданными товарами
 async def get_sold_products(page=1, per_page=20):
     try:
         offset = (page - 1) * per_page
@@ -903,37 +890,6 @@ async def get_sold_products(page=1, per_page=20):
     except Exception as e:
         logger.error(f"Error getting sold products: {e}")
         return [], 0
-
-async def get_disputed_products(page=1, per_page=20):
-    try:
-        offset = (page - 1) * per_page
-        async with db_pool.acquire() as conn:
-            disputed_products = await conn.fetch('''
-                SELECT dp.*, p.name as product_name, u.user_id, u.username, sp.sold_price
-                FROM disputed_products dp
-                LEFT JOIN sold_products sp ON dp.sold_product_id = sp.id
-                LEFT JOIN products p ON sp.product_id = p.id
-                LEFT JOIN users u ON sp.user_id = u.user_id
-                ORDER BY dp.created_at DESC
-                LIMIT $1 OFFSET $2
-            ''', per_page, offset)
-            
-            total = await conn.fetchval('SELECT COUNT(*) FROM disputed_products')
-            return disputed_products, total
-    except Exception as e:
-        logger.error(f"Error getting disputed products: {e}")
-        return [], 0
-
-async def update_dispute_status(dispute_id, status):
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute('''
-                UPDATE disputed_products 
-                SET status = $1, resolved_at = CURRENT_TIMESTAMP
-                WHERE id = $2
-            ''', status, dispute_id)
-    except Exception as e:
-        logger.error(f"Error updating dispute status: {e}")
 
 # Функции для работы с количеством товаров
 async def get_product_quantity(product_id):

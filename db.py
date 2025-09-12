@@ -110,7 +110,10 @@ async def init_db(database_url):
                 try:
                     await conn.execute(f"SELECT {column} FROM purchases LIMIT 1")
                 except Exception:
-                    await conn.execute(f'ALTER TABLE purchases ADD COLUMN {column} TEXT')
+                    if column == 'product_id':
+                        await conn.execute(f'ALTER TABLE purchases ADD COLUMN {column} INTEGER')
+                    else:
+                        await conn.execute(f'ALTER TABLE purchases ADD COLUMN {column} TEXT')
                     logger.info(f"Added {column} column to purchases table")
             
             # Новая таблида для текстов
@@ -240,6 +243,13 @@ async def init_db(database_url):
             )
             ''')
             
+            # Проверяем и добавляем столбец last_reset если его нет
+            try:
+                await conn.execute("SELECT last_reset FROM explorer_api_stats LIMIT 1")
+            except Exception:
+                await conn.execute('ALTER TABLE explorer_api_stats ADD COLUMN last_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+                logger.info("Added last_reset column to explorer_api_stats table")
+            
             # Таблица для сгенерированных адресов
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS generated_addresses (
@@ -297,7 +307,7 @@ async def init_default_data(conn):
                 'no_orders': 'У вас еще не было заказов',
                 'main_menu_description': '''Добро пожаловать в магазин!
 
-Это телеграмм бот для быстрых покупок. 🛒 Так же есть официальный магазин Mega, нажимайте перейти и выбирайте среди огромного ассортимента! 🪏
+Это телеграмм бот для быстрых покупки. 🛒 Так же есть официальный магазин Mega, нажимайте перейти и выбирайте среди огромного ассортимента! 🪏
 
 ❗️ Мы соблюдаем полную конфиденциальность наших клиентов. Мусора бляди! 🤙🏼💪''',
                 'balance_instructions': '''Ваш баланс: {balance}$
@@ -467,7 +477,7 @@ Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბა�
 ეს არის ტელეგრამ ბოტი სწრაფი შესყიდვებისთვის. 🛒 ასევე არის ოფიციალური Mega მაღაზია, დააჭირეთ გადასვლას და აირჩიეთ უზარმაზარი ასორტიმენტიდან! 🪏
 
 ❗️ ჩვენ ვიცავთ ჩვენი კლიენტების სრულ კონფიდენციალურობას. ღორის პოლიციელები! 🤙🏼💪''',
-                                'balance_instructions': '''თქვენი ბალანსი: {balance}$
+                'balance_instructions': '''თქვენი ბალანსი: {balance}$
 
 ბალანსის შევსების ინსტრუქცია:
 Русский: https://telegra.ph/RU-Kak-popolnit-balans-cherez-Litecoin-LTC-06-15
@@ -493,7 +503,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
-• 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
+• 3 წარუ�муატებელი მცდელობა - 24 საათიანი ბანი''',
                 'purchase_invoice': '''💳 შეკვეთის გადახდა
 
 📦 პროდუქტი: {product}
@@ -512,7 +522,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
                 'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
-                'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუ�муატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
+                'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
                 'product_reserved': '✅ პროდუქტი დაჯავშნულია',
                 'product_released': '✅ პროდუქტი დაბრუნდა მარაგში'
@@ -555,8 +565,8 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
         apis = ['blockchair', 'nownodes', 'sochain', 'coingecko', 'binance', 'okx', 'kraken']
         for api in apis:
             await conn.execute('''
-            INSERT INTO explorer_api_stats (explorer_name, total_requests, successful_requests, daily_limit, remaining_daily_requests)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO explorer_api_stats (explorer_name, total_requests, successful_requests, daily_limit, remaining_daily_requests, last_reset)
+            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
             ON CONFLICT (explorer_name) DO NOTHING
             ''', api, 0, 0, 1000, 1000)
         
@@ -789,12 +799,15 @@ async def add_transaction(user_id, amount, currency, order_id, payment_url, expi
 async def add_purchase(user_id, product, price, district, delivery_type, product_id=None, image_url=None, description=None):
     try:
         async with db_pool.acquire() as conn:
+            # Преобразуем product_id в строку если он не None
+            product_id_str = str(product_id) if product_id is not None else None
+            
             # Атомарное обновление счетчика покупок и возврат ID покупки
             purchase_id = await conn.fetchval('''
             INSERT INTO purchases (user_id, product, price, district, delivery_type, product_id, image_url, description)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
-            ''', user_id, product, price, district, delivery_type, product_id, image_url, description)
+            ''', user_id, product, price, district, delivery_type, product_id_str, image_url, description)
             
             # Обновляем счетчик покупки пользователя
             await conn.execute('''
@@ -1064,8 +1077,9 @@ async def reset_api_limits():
         async with db_pool.acquire() as conn:
             await conn.execute('''
             UPDATE explorer_api_stats 
-            SET requests_count = 0, last_reset = CURRENT_TIMESTAMP
-            WHERE last_reset < CURRENT_DATE
+            SET remaining_daily_requests = daily_limit, 
+                last_reset = CURRENT_TIMESTAMP
+            WHERE last_reset < CURRENT_DATE OR last_reset IS NULL
             ''')
     except Exception as e:
         logger.error(f"Error resetting API limits: {e}")

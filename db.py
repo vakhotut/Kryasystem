@@ -224,6 +224,18 @@ async def init_db(database_url):
             )
             ''')
             
+            # Таблица для хранения статистики использования API
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS api_usage_stats (
+                id SERIAL PRIMARY KEY,
+                api_name TEXT NOT NULL,
+                requests_count INTEGER DEFAULT 0,
+                last_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                daily_limit INTEGER DEFAULT 1000,
+                UNIQUE(api_name)
+            )
+            ''')
+            
             # Заполняем таблицы начальными данными, если они пустые
             await init_default_data(conn)
             
@@ -521,6 +533,15 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
             VALUES ($1, $2)
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
             ''', key, value)
+        
+        # Добавляем начальные данные для API
+        apis = ['nownodes', 'blockcypher', 'blockchair', 'coingecko', 'binance', 'coinbase', 'kraken', 'tsanghi']
+        for api in apis:
+            await conn.execute('''
+            INSERT INTO api_usage_stats (api_name, requests_count, daily_limit)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (api_name) DO NOTHING
+            ''', api, 0, 1000)
         
         # Проверяем и добавляем города
         cities_count = await conn.fetchval('SELECT COUNT(*) FROM cities')
@@ -988,3 +1009,34 @@ async def get_all_bot_settings():
     except Exception as e:
         logger.error(f"Error getting all bot settings: {e}")
         return {}
+
+# Функции для работы с API лимитами
+async def increment_api_request(api_name):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+            UPDATE api_usage_stats 
+            SET requests_count = requests_count + 1 
+            WHERE api_name = $1
+            ''', api_name)
+    except Exception as e:
+        logger.error(f"Error incrementing API request count for {api_name}: {e}")
+
+async def get_api_limits():
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetch('SELECT * FROM api_usage_stats')
+    except Exception as e:
+        logger.error(f"Error getting API limits: {e}")
+        return []
+
+async def reset_api_limits():
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+            UPDATE api_usage_stats 
+            SET requests_count = 0, last_reset = CURRENT_TIMESTAMP
+            WHERE last_reset < CURRENT_DATE
+            ''')
+    except Exception as e:
+        logger.error(f"Error resetting API limits: {e}")

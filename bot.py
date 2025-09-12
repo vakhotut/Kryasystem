@@ -64,10 +64,31 @@ dp = Dispatcher(storage=storage)
 db_pool = None
 invoice_notifications = {}
 
+# Глобальные переменные для настроек
+BOT_SETTINGS = {
+    'main_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+    'balance_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+    'category_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+    'district_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+    'delivery_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+    'confirmation_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+    'rules_link': "https://t.me/your_rules",
+    'operator_link': "https://t.me/your_operator",
+    'support_link': "https://t.me/your_support",
+    'channel_link': "https://t.me/your_channel",
+    'reviews_link': "https://t.me/your_reviews",
+    'website_link': "https://yourwebsite.com",
+    'personal_bot_link': "https://t.me/your_bot"
+}
+
 # Доступные криптовалюты (только LTC)
 CRYPTO_CURRENCIES = {
     'LTC': 'Litecoin'
 }
+
+# Функция для получения настроек (в будущем можно заменить на загрузку из БД)
+def get_bot_setting(key):
+    return BOT_SETTINGS.get(key, "")
 
 # Проверка на единственный экземпляр бота
 def singleton_check():
@@ -101,6 +122,33 @@ async def safe_delete_previous_message(chat_id: int, message_id: int, state: FSM
     
     # Очищаем ID сообщения из состояния
     await state.update_data(last_message_id=None)
+
+# Функция для показа меню с изображением
+async def show_menu_with_image(message, caption, keyboard, image_url, state):
+    try:
+        user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
+        data = await state.get_data()
+        
+        if 'last_message_id' in data:
+            await safe_delete_previous_message(user_id, data['last_message_id'], state)
+        
+        sent_message = await message.answer_photo(
+            photo=image_url,
+            caption=caption,
+            reply_markup=keyboard
+        )
+        
+        await state.update_data(last_message_id=sent_message.message_id)
+        return sent_message
+    except Exception as e:
+        logger.error(f"Error showing menu with image: {e}")
+        # Fallback to text message if image fails
+        sent_message = await message.answer(
+            text=caption,
+            reply_markup=keyboard
+        )
+        await state.update_data(last_message_id=sent_message.message_id)
+        return sent_message
 
 # Функция для уведомлений об инвойсе
 async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
@@ -213,20 +261,14 @@ async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
         builder.row(InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="topup_balance"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
         
-        image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
-        
-        # Удаляем предыдущее сообщение
-        state_data = await state.get_data()
-        if 'last_message_id' in state_data:
-            await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
-        
-        sent_message = await callback.message.answer_photo(
-            photo=image_url,
-            caption=balance_text,
-            reply_markup=builder.as_markup()
+        # Используем функцию для показа меню с изображением
+        await show_menu_with_image(
+            callback.message,
+            balance_text,
+            builder.as_markup(),
+            get_bot_setting('balance_menu_image'),
+            state
         )
-        
-        await state.update_data(last_message_id=sent_message.message_id)
     except Exception as e:
         logger.error(f"Error showing balance menu: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
@@ -244,17 +286,14 @@ async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMCont
         builder.row(InlineKeyboardButton(text="LTC", callback_data="topup_ltc"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_balance_menu"))
         
-        # Удаляем предыдущее сообщение
-        state_data = await state.get_data()
-        if 'last_message_id' in state_data:
-            await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
-        
-        sent_message = await callback.message.answer(
-            text=topup_info,
-            reply_markup=builder.as_markup()
+        # Используем функцию для показа меню с изображением
+        await show_menu_with_image(
+            callback.message,
+            topup_info,
+            builder.as_markup(),
+            get_bot_setting('balance_menu_image'),
+            state
         )
-        
-        await state.update_data(last_message_id=sent_message.message_id)
     except Exception as e:
         logger.error(f"Error showing topup currency menu: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
@@ -451,32 +490,29 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
             InlineKeyboardButton(text=f"💰 {get_text(lang, 'balance', balance=user['balance'] or 0)}", callback_data="balance"),
             InlineKeyboardButton(text="📦 Последний заказ", callback_data="last_order")
         )
+        
+        # Добавляем кнопки с ссылками
         builder.row(
             InlineKeyboardButton(text="🎁 Бонусы", callback_data="bonuses"),
-            InlineKeyboardButton(text="📚 Правила", callback_data="rules")
+            InlineKeyboardButton(text="📚 Правила", url=get_bot_setting('rules_link'))
         )
         builder.row(
-            InlineKeyboardButton(text="👨‍💻 Оператор", callback_data="operator"),
-            InlineKeyboardButton(text="🔧 Техподдержка", callback_data="support")
+            InlineKeyboardButton(text="👨‍💻 Оператор", url=get_bot_setting('operator_link')),
+            InlineKeyboardButton(text="🔧 Техподдержка", url=get_bot_setting('support_link'))
         )
-        builder.row(InlineKeyboardButton(text="📢 Наш канал", callback_data="channel"))
-        builder.row(InlineKeyboardButton(text="⭐ Отзывы", callback_data="reviews"))
-        builder.row(InlineKeyboardButton(text="🌐 Наш сайт", callback_data="website"))
-        builder.row(InlineKeyboardButton(text="🤖 Личный бот", callback_data="personal_bot"))
+        builder.row(InlineKeyboardButton(text="📢 Наш канал", url=get_bot_setting('channel_link')))
+        builder.row(InlineKeyboardButton(text="⭐ Отзывы", url=get_bot_setting('reviews_link')))
+        builder.row(InlineKeyboardButton(text="🌐 Наш сайт", url=get_bot_setting('website_link')))
+        builder.row(InlineKeyboardButton(text="🤖 Личный бот", url=get_bot_setting('personal_bot_link')))
         
-        image_url = "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true"
-        
-        data = await state.get_data()
-        if 'last_message_id' in data:
-            await safe_delete_previous_message(user_id, data['last_message_id'], state)
-        
-        sent_message = await message.answer_photo(
-            photo=image_url,
-            caption=full_text,
-            reply_markup=builder.as_markup()
+        # Используем функцию для показа меню с изображением
+        await show_menu_with_image(
+            message,
+            full_text,
+            builder.as_markup(),
+            get_bot_setting('main_menu_image'),
+            state
         )
-        
-        await state.update_data(last_message_id=sent_message.message_id)
     except Exception as e:
         logger.error(f"Error showing main menu: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
@@ -519,11 +555,14 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
                 builder.row(InlineKeyboardButton(text=category['name'], callback_data=f"cat_{category['name']}"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
             
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'select_category'),
-                reply_markup=builder.as_markup()
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                get_text(lang, 'select_category'),
+                builder.as_markup(),
+                get_bot_setting('category_menu_image'),
+                state
             )
-            await state.update_data(last_message_id=sent_message.message_id)
             await state.set_state(Form.category)
         elif data == 'balance':
             await show_balance_menu(callback, state)
@@ -563,35 +602,23 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             )
             await state.update_data(last_message_id=sent_message.message_id)
         elif data == 'rules':
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'rules')
-            )
-            await state.update_data(last_message_id=sent_message.message_id)
+            # Открываем ссылку на правила
+            await callback.message.answer("Переходим к правилам...")
         elif data == 'operator' or data == 'support':
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'support')
-            )
-            await state.update_data(last_message_id=sent_message.message_id)
+            # Открываем ссылку на оператора/поддержку
+            await callback.message.answer("Связываемся с оператором...")
         elif data == 'channel':
-            sent_message = await callback.message.answer(
-                text="https://t.me/your_channel"
-            )
-            await state.update_data(last_message_id=sent_message.message_id)
+            # Открываем ссылку на канал
+            await callback.message.answer("Переходим в канал...")
         elif data == 'reviews':
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'reviews')
-            )
-            await state.update_data(last_message_id=sent_message.message_id)
+            # Открываем ссылку на отзывы
+            await callback.message.answer("Переходим к отзывам...")
         elif data == 'website':
-            sent_message = await callback.message.answer(
-                text="https://yourwebsite.com"
-            )
-            await state.update_data(last_message_id=sent_message.message_id)
+            # Открываем ссылку на сайт
+            await callback.message.answer("Переходим на сайт...")
         elif data == 'personal_bot':
-            sent_message = await callback.message.answer(
-                text="https://t.me/your_bot"
-            )
-            await state.update_data(last_message_id=sent_message.message_id)
+            # Открываем ссылку на личного бота
+            await callback.message.answer("Переходим к личному боту...")
         elif data == 'back_to_main':
             await show_main_menu(callback.message, state, user_id, lang)
             await state.set_state(Form.main_menu)
@@ -723,11 +750,14 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
             builder.row(InlineKeyboardButton(text=f"{product_name} - ${price}", callback_data=f"prod_{product_name}"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_city"))
         
-        sent_message = await callback.message.answer(
-            text="Выберите товар:",
-            reply_markup=builder.as_markup()
+        # Используем функцию для показа меню с изображением
+        await show_menu_with_image(
+            callback.message,
+            "Выберите товар:",
+            builder.as_markup(),
+            get_bot_setting('category_menu_image'),
+            state
         )
-        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.district)
     except Exception as e:
         logger.error(f"Error processing category: {e}")
@@ -759,11 +789,14 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
                 builder.row(InlineKeyboardButton(text=category['name'], callback_data=f"cat_{category['name']}"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
             
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'select_category'),
-                reply_markup=builder.as_markup()
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                get_text(lang, 'select_category'),
+                builder.as_markup(),
+                get_bot_setting('category_menu_image'),
+                state
             )
-            await state.update_data(last_message_id=sent_message.message_id)
             await state.set_state(Form.category)
             return
         
@@ -796,11 +829,14 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
                 builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_category"))
             
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'select_district'),
-                reply_markup=builder.as_markup()
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                get_text(lang, 'select_district'),
+                builder.as_markup(),
+                get_bot_setting('district_menu_image'),
+                state
             )
-            await state.update_data(last_message_id=sent_message.message_id)
             await state.set_state(Form.district)
         elif data.startswith('dist_'):
             district = data.replace('dist_', '')
@@ -814,11 +850,14 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
                 builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
             
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'select_delivery'),
-                reply_markup=builder.as_markup()
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                get_text(lang, 'select_delivery'),
+                builder.as_markup(),
+                get_bot_setting('delivery_menu_image'),
+                state
             )
-            await state.update_data(last_message_id=sent_message.message_id)
             await state.set_state(Form.delivery)
     except Exception as e:
         logger.error(f"Error processing district: {e}")
@@ -851,11 +890,14 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
                 builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_category"))
             
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'select_district'),
-                reply_markup=builder.as_markup()
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                get_text(lang, 'select_district'),
+                builder.as_markup(),
+                get_bot_setting('district_menu_image'),
+                state
             )
-            await state.update_data(last_message_id=sent_message.message_id)
             await state.set_state(Form.district)
             return
         
@@ -893,11 +935,14 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
         builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_delivery"))
         
-        sent_message = await callback.message.answer(
-            text=order_text,
-            reply_markup=builder.as_markup()
+        # Используем функцию для показа меню с изображением
+        await show_menu_with_image(
+            callback.message,
+            order_text,
+            builder.as_markup(),
+            get_bot_setting('confirmation_menu_image'),
+            state
         )
-        await state.update_data(last_message_id=sent_message.message_id)
         await state.set_state(Form.confirmation)
     except Exception as e:
         logger.error(f"Error processing delivery: {e}")
@@ -926,11 +971,14 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
                 builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
             
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'select_delivery'),
-                reply_markup=builder.as_markup()
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                get_text(lang, 'select_delivery'),
+                builder.as_markup(),
+                get_bot_setting('delivery_menu_image'),
+                state
             )
-            await state.update_data(last_message_id=sent_message.message_id)
             await state.set_state(Form.delivery)
             return
         
@@ -961,11 +1009,14 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             builder.row(InlineKeyboardButton(text="LTC", callback_data="crypto_LTC"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_confirmation"))
             
-            sent_message = await callback.message.answer(
-                text=get_text(lang, 'select_crypto'),
-                reply_markup=builder.as_markup()
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                get_text(lang, 'select_crypto'),
+                builder.as_markup(),
+                get_bot_setting('confirmation_menu_image'),
+                state
             )
-            await state.update_data(last_message_id=sent_message.message_id)
             await state.set_state(Form.crypto_currency)
         else:
             await show_main_menu(callback.message, state, user_id, lang)
@@ -1107,11 +1158,14 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
             builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_delivery"))
             
-            sent_message = await callback.message.answer(
-                text=order_text,
-                reply_markup=builder.as_markup()
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                order_text,
+                builder.as_markup(),
+                get_bot_setting('confirmation_menu_image'),
+                state
             )
-            await state.update_data(last_message_id=sent_message.message_id)
             await state.set_state(Form.confirmation)
             return
         

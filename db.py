@@ -57,6 +57,20 @@ async def init_db(database_url):
             )
             ''')
             
+            # Проверяем и добавляем недостающие колонки в users
+            user_columns_to_check = ['referral_code', 'referral_count', 'earned_from_referrals', 'referrer_id']
+            for column in user_columns_to_check:
+                try:
+                    await conn.execute(f"SELECT {column} FROM users LIMIT 1")
+                except Exception:
+                    if column == 'referrer_id':
+                        await conn.execute(f'ALTER TABLE users ADD COLUMN {column} BIGINT REFERENCES users(user_id)')
+                    elif column in ['referral_count', 'earned_from_referrals']:
+                        await conn.execute(f'ALTER TABLE users ADD COLUMN {column} INTEGER DEFAULT 0')
+                    else:
+                        await conn.execute(f'ALTER TABLE users ADD COLUMN {column} TEXT')
+                    logger.info(f"Added {column} column to users table")
+            
             # Таблица транзакций
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS transactions (
@@ -202,20 +216,6 @@ async def init_db(database_url):
             )
             ''')
             
-            # Таблица проданных товаров
-            await conn.execute('''
-            CREATE TABLE IF NOT EXISTS sold_products (
-                id SERIAL PRIMARY KEY,
-                product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
-                subcategory_id INTEGER REFERENCES subcategories(id),
-                user_id BIGINT REFERENCES users(user_id),
-                quantity INTEGER DEFAULT 1,
-                sold_price REAL NOT NULL,
-                sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                purchase_id INTEGER REFERENCES purchases(id)
-            )
-            ''')
-            
             # Добавляем недостающие столбцы, если они еще не существуют
             columns_to_check = [
                 'category_id', 'district_id', 'delivery_type_id', 'uuid', 'description', 'subcategory_id'
@@ -234,6 +234,20 @@ async def init_db(database_url):
                     else:
                         await conn.execute(f'ALTER TABLE products ADD COLUMN {column} INTEGER REFERENCES {column.split("_")[0] + "s"}(id)')
                     logger.info(f"Added {column} column to products table")
+            
+            # Таблица проданных товаров
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS sold_products (
+                id SERIAL PRIMARY KEY,
+                product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+                subcategory_id INTEGER REFERENCES subcategories(id),
+                user_id BIGINT REFERENCES users(user_id),
+                quantity INTEGER DEFAULT 1,
+                sold_price REAL NOT NULL,
+                sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                purchase_id INTEGER REFERENCES purchases(id)
+            )
+            ''')
             
             # Таблица для настроек бота
             await conn.execute('''
@@ -358,7 +372,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • 3 неудачные попытки - бан на 24 часа''',
                 'purchase_invoice': '''💳 Оплата заказа
 
-📦 Товар: {product}
+📦 Т товар: {product}
 📝 Адрес для оплаты: `{crypto_address}`
 💎 Сумма к оплате: {crypto_amount} LTC
 💰 Сумма в USD: ${amount}
@@ -523,7 +537,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
-• 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
+• 3 წარუ�მატებელი მცდელობა - 24 საათიანი ბანი''',
                 'purchase_invoice': '''💳 შეკვეთის გადახდა
 
 📦 პროდუქტი: {product}
@@ -540,7 +554,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
-                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუ�მატებელი მცდელობები: {failed_count}/3',
+                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
                 'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
                 'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
@@ -1060,7 +1074,7 @@ async def release_subcategory(subcategory_id, quantity=1):
     try:
         async with db_pool.acquire() as conn:
             await conn.execute('''
-                UPDATE subcategories 
+                                UPDATE subcategories 
                 SET quantity = quantity + $1 
                 WHERE id = $2
             ''', quantity, subcategory_id)
@@ -1414,72 +1428,3 @@ async def generate_referral_code(user_id):
     except Exception as e:
         logger.error(f"Error generating referral code: {e}")
         return None
-
-# Добавленные функции для работы с количеством товаров
-async def get_product_quantity(product_id):
-    """Получить количество товара по его ID"""
-    try:
-        async with db_pool.acquire() as conn:
-            # Сначала получаем subcategory_id из продукта
-            subcategory_id = await conn.fetchval(
-                'SELECT subcategory_id FROM products WHERE id = $1', 
-                product_id
-            )
-            if not subcategory_id:
-                return 0
-                
-            # Затем получаем количество из подкатегории
-            return await conn.fetchval(
-                'SELECT quantity FROM subcategories WHERE id = $1',
-                subcategory_id
-            )
-    except Exception as e:
-        logger.error(f"Error getting product quantity: {e}")
-        return 0
-
-async def reserve_product(product_id):
-    """Забронировать товар (уменьшить количество на 1)"""
-    try:
-        async with db_pool.acquire() as conn:
-            # Получаем subcategory_id продукта
-            subcategory_id = await conn.fetchval(
-                'SELECT subcategory_id FROM products WHERE id = $1',
-                product_id
-            )
-            if not subcategory_id:
-                return False
-                
-            # Уменьшаем количество в подкатегории
-            result = await conn.execute('''
-                UPDATE subcategories 
-                SET quantity = quantity - 1 
-                WHERE id = $1 AND quantity > 0
-            ''', subcategory_id)
-            
-            return "UPDATE 1" in str(result)
-    except Exception as e:
-        logger.error(f"Error reserving product: {e}")
-        return False
-
-async def release_product(product_id):
-    """Вернуть товар (увеличить количество на 1)"""
-    try:
-        async with db_pool.acquire() as conn:
-            # Получаем subcategory_id продукта
-            subcategory_id = await conn.fetchval(
-                'SELECT subcategory_id FROM products WHERE id = $1',
-                product_id
-            )
-            if not subcategory_id:
-                return False
-                
-            # Увеличиваем количество в подкатегории
-            await conn.execute('''
-                UPDATE subcategories 
-                SET quantity = quantity + 1 
-                WHERE id = $1
-            ''', subcategory_id)
-            return True
-    except Exception as e:
-        logger.error(f"Error releasing product: {e}")
-        return False

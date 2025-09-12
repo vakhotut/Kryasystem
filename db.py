@@ -23,6 +23,7 @@ districts_cache = {}
 products_cache = {}
 delivery_types_cache = []
 categories_cache = []
+subcategories_cache = {}
 bot_settings_cache = {}
 
 # Инициализация базы данных
@@ -156,6 +157,18 @@ async def init_db(database_url):
             )
             ''')
             
+            # Новая таблица для подкатегорий товаров
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS subcategories (
+                id SERIAL PRIMARY KEY,
+                category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                quantity INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(category_id, name)
+            )
+            ''')
+            
             # Новая таблица для типов доставки
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS delivery_types (
@@ -174,27 +187,21 @@ async def init_db(database_url):
                 price REAL NOT NULL,
                 image_url TEXT,
                 category_id INTEGER REFERENCES categories(id),
+                subcategory_id INTEGER REFERENCES subcategories(id),
                 city_id INTEGER REFERENCES cities(id),
                 district_id INTEGER REFERENCES districts(id),
                 delivery_type_id INTEGER REFERENCES delivery_types(id),
-                quantity INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
-            
-            # Проверяем и добавляем колонку quantity в products
-            try:
-                await conn.execute("SELECT quantity FROM products LIMIT 1")
-            except Exception:
-                await conn.execute('ALTER TABLE products ADD COLUMN quantity INTEGER DEFAULT 1')
-                logger.info("Added quantity column to products table")
             
             # Таблица проданных товаров
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS sold_products (
                 id SERIAL PRIMARY KEY,
                 product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+                subcategory_id INTEGER REFERENCES subcategories(id),
                 user_id BIGINT REFERENCES users(user_id),
                 quantity INTEGER DEFAULT 1,
                 sold_price REAL NOT NULL,
@@ -205,7 +212,7 @@ async def init_db(database_url):
             
             # Добавляем недостающие столбцы, если они еще не существуют
             columns_to_check = [
-                'category_id', 'district_id', 'delivery_type_id', 'uuid', 'description'
+                'category_id', 'district_id', 'delivery_type_id', 'uuid', 'description', 'subcategory_id'
             ]
             
             for column in columns_to_check:
@@ -216,6 +223,8 @@ async def init_db(database_url):
                         await conn.execute(f'ALTER TABLE products ADD COLUMN {column} TEXT UNIQUE')
                     elif column == 'description':
                         await conn.execute(f'ALTER TABLE products ADD COLUMN {column} TEXT')
+                    elif column == 'subcategory_id':
+                        await conn.execute(f'ALTER TABLE products ADD COLUMN {column} INTEGER REFERENCES subcategories(id)')
                     else:
                         await conn.execute(f'ALTER TABLE products ADD COLUMN {column} INTEGER REFERENCES {column.split("_")[0] + "s"}(id)')
                     logger.info(f"Added {column} column to products table")
@@ -287,6 +296,7 @@ async def init_default_data(conn):
                 'main_menu': "👤 Имя: {name}\n📛 Юзернейм: @{username}\n🛒 Покупок: {purchases}\n🎯 Скидка: {discount}%\n💰 Баланс: {balance}$",
                 'select_city': 'Выберите город:',
                 'select_category': 'Выберите категорию:',
+                'select_subcategory': 'Выберите подкатегорию:',
                 'select_district': 'Выберите район:',
                 'select_delivery': 'Выберите тип доставки:',
                 'order_summary': "Информация о заказе:\n📦 Товар: {product}\n💵 Стоимость: {price}$\n🏙 Район: {district}\n🚚 Тип доставки: {delivery_type}\n\nВсё верно?",
@@ -371,6 +381,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                 'main_menu': "👤 Name: {name}\n📛 Username: @{username}\n🛒 Purchases: {purchases}\n🎯 Discount: {discount}%\n💰 Balance: {balance}$",
                 'select_city': 'Select city:',
                 'select_category': 'Select category:',
+                'select_subcategory': 'Select subcategory:',
                 'select_district': 'Select district:',
                 'select_delivery': 'Select delivery type:',
                 'order_summary': "Order information:\n📦 Product: {product}\n💵 Price: {price}$\n🏙 District: {district}\n🚚 Delivery type: {delivery_type}\n\nIs everything correct?",
@@ -454,6 +465,7 @@ Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბა�
                 'main_menu': "👤 სახელი: {name}\n📛 მომხმარებლის სახელი: @{username}\n🛒 ყიდვები: {purchases}\n🎯 ფასდაკლება: {discount}%\n💰 ბალანსი: {balance}$",
                 'select_city': 'აირჩიეთ ქალაქი:',
                 'select_category': 'აირჩიეთ კატეგორია:',
+                'select_subcategory': 'აირჩიეთ ქვეკატეგორია:',
                 'select_district': 'აირჩიეთ რაიონი:',
                 'select_delivery': 'აირჩიეთ მიწოდების ტიპი:',
                 'order_summary': "შეკვეთის ინფორმაცია:\n📦 პროდუქტი: {product}\n💵 ფასი: {price}$\n🏙 რაიონი: {district}\n🚚 მიწოდების ტიპი: {delivery_type}\n\nყველაფერი სწორია?",
@@ -544,6 +556,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
             'main_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
             'balance_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
             'category_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
+            'subcategory_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
             'district_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
             'delivery_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
             'confirmation_menu_image': "https://github.com/vakhotut/Kryasystem/blob/95692762b04dde6722f334e2051118623e67df47/IMG_20250906_162606_873.jpg?raw=true",
@@ -599,10 +612,37 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                 # Добавляем категории товаров
                 categories = ['Мефедрон', 'Амфетамин', 'Кокаин', 'Гашиш']
                 for category in categories:
-                    await conn.execute('''
+                    category_id = await conn.fetchval('''
                     INSERT INTO categories (name) VALUES ($1)
                     ON CONFLICT (name) DO NOTHING
+                    RETURNING id
                     ''', category)
+                    
+                    # Добавляем подкатегории для каждой категории
+                    if category == 'Мефедрон':
+                        subcategories = [
+                            ('0.5 г', 10),
+                            ('1.0 г', 5),
+                            ('Золотой 0.5 г', 3)
+                        ]
+                    elif category == 'Амфетамин':
+                        subcategories = [
+                            ('0.3 г Красный', 8),
+                            ('0.5 г Белый', 6)
+                        ]
+                    else:
+                        subcategories = [
+                            ('0.5 г', 5),
+                            ('1.0 г', 3)
+                        ]
+                    
+                    for sub_name, quantity in subcategories:
+                        subcategory_id = await conn.fetchval('''
+                        INSERT INTO subcategories (category_id, name, quantity)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (category_id, name) DO NOTHING
+                        RETURNING id
+                        ''', category_id, sub_name, quantity)
                 
                 # Добавляем типы доставки
                 delivery_types = ['Подъезд', 'Прикоп', 'Магнит', 'Во дворах']
@@ -615,22 +655,27 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                 # Добавляем товары для каждого города
                 if city == 'Тбилиси':
                     products = [
-                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд', 10),
-                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд', 5),
-                        ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 'Мефедрон', 'Центр', 'Подъезд', 3),
-                        ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 'Амфетамин', 'Центр', 'Подъезд', 8)
+                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', '0.5 г', 'Центр', 'Подъезд'),
+                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', '1.0 г', 'Центр', 'Подъезд'),
+                        ('0.5 меф золотой', 'Премиум мефедрон', 50, 'https://example.com/image3.jpg', 'Мефедрон', 'Золотой 0.5 г', 'Центр', 'Подъезд'),
+                        ('0.3 красный', 'Красный фосфор', 35, 'https://example.com/image4.jpg', 'Амфетамин', '0.3 г Красный', 'Центр', 'Подъезд')
                     ]
                 else:
                     products = [
-                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', 'Центр', 'Подъезд', 5),
-                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', 'Центр', 'Подъезд', 3)
+                        ('0.5 меф', 'Высококачественный мефедрон', 35, 'https://example.com/image1.jpg', 'Мефедрон', '0.5 г', 'Центр', 'Подъезд'),
+                        ('1.0 меф', 'Высококачественный мефедрон', 70, 'https://example.com/image2.jpg', 'Мефедрон', '1.0 г', 'Центр', 'Подъезд')
                     ]
                     
-                # Получаем ID категорий, районов и типов доставки
+                # Получаем ID категорий, подкатегорий, районов и типов доставки
                 categories_dict = {}
                 categories_rows = await conn.fetch('SELECT * FROM categories')
                 for row in categories_rows:
                     categories_dict[row['name']] = row['id']
+                    
+                subcategories_dict = {}
+                subcategories_rows = await conn.fetch('SELECT * FROM subcategories')
+                for row in subcategories_rows:
+                    subcategories_dict[(row['category_id'], row['name'])] = row['id']
                     
                 districts_dict = {}
                 districts_rows = await conn.fetch('SELECT * FROM districts WHERE city_id = $1', city_id)
@@ -643,18 +688,19 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                     delivery_types_dict[row['name']] = row['id']
                     
                 # Добавляем товары
-                for product_name, description, price, image_url, category_name, district_name, delivery_type_name, quantity in products:
+                for product_name, description, price, image_url, category_name, subcategory_name, district_name, delivery_type_name in products:
                     category_id = categories_dict.get(category_name)
+                    subcategory_id = subcategories_dict.get((category_id, subcategory_name))
                     district_id = districts_dict.get(district_name)
                     delivery_type_id = delivery_types_dict.get(delivery_type_name)
                     
-                    if category_id and district_id and delivery_type_id:
+                    if category_id and subcategory_id and district_id and delivery_type_id:
                         product_uuid = str(uuid.uuid4())
                         await conn.execute('''
-                        INSERT INTO products (uuid, name, description, price, image_url, category_id, city_id, district_id, delivery_type_id, quantity)
+                        INSERT INTO products (uuid, name, description, price, image_url, category_id, subcategory_id, city_id, district_id, delivery_type_id)
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         ON CONFLICT (uuid) DO NOTHING
-                        ''', product_uuid, product_name, description, price, image_url, category_id, city_id, district_id, delivery_type_id, quantity)
+                        ''', product_uuid, product_name, description, price, image_url, category_id, subcategory_id, city_id, district_id, delivery_type_id)
         
         logger.info("Default data initialized successfully")
     except Exception as e:
@@ -664,7 +710,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 
 # Функция для загрузки данных в кэш
 async def load_cache():
-    global texts_cache, cities_cache, districts_cache, products_cache, delivery_types_cache, categories_cache, bot_settings_cache
+    global texts_cache, cities_cache, districts_cache, products_cache, delivery_types_cache, categories_cache, subcategories_cache, bot_settings_cache
     
     try:
         async with db_pool.acquire() as conn:
@@ -688,13 +734,23 @@ async def load_cache():
             categories_rows = await conn.fetch('SELECT * FROM categories ORDER BY name')
             categories_cache = [dict(row) for row in categories_rows]
             
+            # Загрузка подкатегорий
+            subcategories_rows = await conn.fetch('SELECT * FROM subcategories ORDER BY name')
+            subcategories_cache = {}
+            for row in subcategories_rows:
+                if row['category_id'] not in subcategories_cache:
+                    subcategories_cache[row['category_id']] = []
+                subcategories_cache[row['category_id']].append(dict(row))
+            
             # Загрузка товары
             products_cache = {}
             for city in cities_cache:
                 products = await conn.fetch('''
-                    SELECT p.id, p.name, p.description, p.price, p.image_url, p.quantity, c.name as category_name
+                    SELECT p.id, p.name, p.description, p.price, p.image_url, 
+                           c.name as category_name, s.name as subcategory_name, s.quantity
                     FROM products p 
                     LEFT JOIN categories c ON p.category_id = c.id
+                    LEFT JOIN subcategories s ON p.subcategory_id = s.id
                     WHERE p.city_id = $1 
                     ORDER BY p.name
                 ''', city['id'])
@@ -705,6 +761,7 @@ async def load_cache():
                         'price': product['price'], 
                         'image': product['image_url'],
                         'category': product['category_name'],
+                        'subcategory': product['subcategory_name'],
                         'quantity': product['quantity']
                     } for product in products
                 }
@@ -821,20 +878,28 @@ async def add_purchase(user_id, product, price, district, delivery_type, product
         logger.error(f"Error adding purchase for user {user_id}: {e}")
         return None
 
-async def add_sold_product(product_id, user_id, quantity, sold_price, purchase_id):
+async def add_sold_product(product_id, subcategory_id, user_id, quantity, sold_price, purchase_id):
     try:
         async with db_pool.acquire() as conn:
-            # Уменьшаем количество товара на складе
-            success = await reserve_product(product_id, quantity)
-            
-            if not success:
-                raise Exception("Недостаточно товара на складе")
+            # Уменьшаем количество в подкатегории
+            await conn.execute('''
+            UPDATE subcategories 
+            SET quantity = quantity - $1 
+            WHERE id = $2 AND quantity >= $1
+            ''', quantity, subcategory_id)
             
             # Добавляем запись о проданном товаре
             await conn.execute('''
-            INSERT INTO sold_products (product_id, user_id, quantity, sold_price, purchase_id)
-            VALUES ($1, $2, $3, $4, $5)
-            ''', product_id, user_id, quantity, sold_price, purchase_id)
+            INSERT INTO sold_products (product_id, subcategory_id, user_id, quantity, sold_price, purchase_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ''', product_id, subcategory_id, user_id, quantity, sold_price, purchase_id)
+            
+            # Проверяем, осталось ли количество в подкатегории
+            current_quantity = await conn.fetchval('SELECT quantity FROM subcategories WHERE id = $1', subcategory_id)
+            
+            # Если количество стало 0, удаляем все товары этой подкатегории
+            if current_quantity <= 0:
+                await conn.execute('DELETE FROM products WHERE subcategory_id = $1', subcategory_id)
             
             return True
     except Exception as e:
@@ -930,6 +995,9 @@ def get_delivery_types_cache():
 def get_categories_cache():
     return categories_cache
 
+def get_subcategories_cache():
+    return subcategories_cache
+
 def get_texts_cache():
     return texts_cache
 
@@ -942,9 +1010,11 @@ async def get_sold_products(page=1, per_page=20):
         offset = (page - 1) * per_page
         async with db_pool.acquire() as conn:
             sold_products = await conn.fetch('''
-                SELECT sp.*, p.name as product_name, u.user_id, u.username
+                SELECT sp.*, p.name as product_name, s.name as subcategory_name, 
+                       u.user_id, u.username, s.quantity as remaining_quantity
                 FROM sold_products sp
                 LEFT JOIN products p ON sp.product_id = p.id
+                LEFT JOIN subcategories s ON sp.subcategory_id = s.id
                 LEFT JOIN users u ON sp.user_id = u.user_id
                 ORDER BY sp.sold_at DESC
                 LIMIT $1 OFFSET $2
@@ -957,49 +1027,50 @@ async def get_sold_products(page=1, per_page=20):
         return [], 0
 
 # Функции для работы с количеством товаров
-async def get_product_quantity(product_id):
+async def get_subcategory_quantity(subcategory_id):
     try:
         async with db_pool.acquire() as conn:
-            return await conn.fetchval('SELECT quantity FROM products WHERE id = $1', product_id)
+            return await conn.fetchval('SELECT quantity FROM subcategories WHERE id = $1', subcategory_id)
     except Exception as e:
-        logger.error(f"Error getting product quantity: {e}")
+        logger.error(f"Error getting subcategory quantity: {e}")
         return 0
 
-async def reserve_product(product_id, quantity=1):
+async def reserve_subcategory(subcategory_id, quantity=1):
     try:
         async with db_pool.acquire() as conn:
             result = await conn.execute('''
-                UPDATE products 
+                UPDATE subcategories 
                 SET quantity = quantity - $1 
                 WHERE id = $2 AND quantity >= $1
-            ''', quantity, product_id)
+            ''', quantity, subcategory_id)
             
             # Проверяем, была ли обновлена хотя бы одна строка
             return "UPDATE 1" in str(result)
     except Exception as e:
-        logger.error(f"Error reserving product: {e}")
+        logger.error(f"Error reserving subcategory: {e}")
         return False
 
-async def release_product(product_id, quantity=1):
+async def release_subcategory(subcategory_id, quantity=1):
     try:
         async with db_pool.acquire() as conn:
             await conn.execute('''
-                UPDATE products 
+                UPDATE subcategories 
                 SET quantity = quantity + $1 
                 WHERE id = $2
-            ''', quantity, product_id)
+            ''', quantity, subcategory_id)
             return True
     except Exception as e:
-        logger.error(f"Error releasing product: {e}")
+        logger.error(f"Error releasing subcategory: {e}")
         return False
 
 async def get_product_by_name_city(product_name, city_name):
     try:
         async with db_pool.acquire() as conn:
             return await conn.fetchrow('''
-                SELECT p.* 
+                SELECT p.*, s.quantity as subcategory_quantity
                 FROM products p
                 JOIN cities c ON p.city_id = c.id
+                JOIN subcategories s ON p.subcategory_id = s.id
                 WHERE p.name = $1 AND c.name = $2
             ''', product_name, city_name)
     except Exception as e:
@@ -1009,7 +1080,12 @@ async def get_product_by_name_city(product_name, city_name):
 async def get_product_by_id(product_id):
     try:
         async with db_pool.acquire() as conn:
-            return await conn.fetchrow('SELECT * FROM products WHERE id = $1', product_id)
+            return await conn.fetchrow('''
+                SELECT p.*, s.quantity as subcategory_quantity
+                FROM products p
+                JOIN subcategories s ON p.subcategory_id = s.id
+                WHERE p.id = $1
+            ''', product_id)
     except Exception as e:
         logger.error(f"Error getting product by ID: {e}")
         return None
@@ -1205,7 +1281,8 @@ async def is_district_available(city_name, district_name):
                 FROM products p
                 JOIN cities c ON p.city_id = c.id
                 JOIN districts d ON p.district_id = d.id
-                WHERE c.name = $1 AND d.name = $2 AND p.quantity > 0
+                JOIN subcategories s ON p.subcategory_id = s.id
+                WHERE c.name = $1 AND d.name = $2 AND s.quantity > 0
             ''', city_name, district_name)
             return count > 0
     except Exception as e:
@@ -1220,9 +1297,75 @@ async def is_delivery_type_available(delivery_type_name):
                 SELECT COUNT(*) 
                 FROM products p
                 JOIN delivery_types dt ON p.delivery_type_id = dt.id
-                WHERE dt.name = $1 AND p.quantity > 0
+                JOIN subcategories s ON p.subcategory_id = s.id
+                WHERE dt.name = $1 AND s.quantity > 0
             ''', delivery_type_name)
             return count > 0
     except Exception as e:
         logger.error(f"Error checking delivery type availability: {e}")
+        return False
+
+# Функции для работы с подкатегориями
+async def get_subcategories_by_category(category_id):
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetch('SELECT * FROM subcategories WHERE category_id = $1 ORDER BY name', category_id)
+    except Exception as e:
+        logger.error(f"Error getting subcategories for category {category_id}: {e}")
+        return []
+
+async def add_subcategory(category_id, name, quantity=0):
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchval('''
+                INSERT INTO subcategories (category_id, name, quantity)
+                VALUES ($1, $2, $3)
+                RETURNING id
+            ''', category_id, name, quantity)
+    except Exception as e:
+        logger.error(f"Error adding subcategory: {e}")
+        return None
+
+async def update_subcategory(subcategory_id, name=None, quantity=None):
+    try:
+        updates = []
+        values = []
+        
+        if name is not None:
+            updates.append("name = $1")
+            values.append(name)
+        
+        if quantity is not None:
+            updates.append("quantity = $2")
+            values.append(quantity)
+        
+        if not updates:
+            return True
+            
+        values.append(subcategory_id)
+        
+        async with db_pool.acquire() as conn:
+            await conn.execute(f'''
+                UPDATE subcategories 
+                SET {', '.join(updates)}
+                WHERE id = ${len(values)}
+            ''', *values)
+            
+            return True
+    except Exception as e:
+        logger.error(f"Error updating subcategory {subcategory_id}: {e}")
+        return False
+
+async def delete_subcategory(subcategory_id):
+    try:
+        async with db_pool.acquire() as conn:
+            # Удаляем все товары этой подкатегории
+            await conn.execute('DELETE FROM products WHERE subcategory_id = $1', subcategory_id)
+            
+            # Удаляем подкатегорию
+            await conn.execute('DELETE FROM subcategories WHERE id = $1', subcategory_id)
+            
+            return True
+    except Exception as e:
+        logger.error(f"Error deleting subcategory {subcategory_id}: {e}")
         return False

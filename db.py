@@ -82,6 +82,8 @@ async def init_db(database_url):
                 except Exception:
                     if column == 'product_id':
                         await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} INTEGER')
+                    elif column == 'crypto_amount':
+                        await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} REAL')
                     else:
                         await conn.execute(f'ALTER TABLE transactions ADD COLUMN {column} TEXT')
                     logger.info(f"Added {column} column to transactions table")
@@ -503,7 +505,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
-• 3 წარუ�муატებელი მცდელობა - 24 საათიანი ბანი''',
+• 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'purchase_invoice': '''💳 შეკვეთის გადახდა
 
 📦 პროდუქტი: {product}

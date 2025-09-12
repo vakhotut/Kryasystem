@@ -27,7 +27,8 @@ from db import (
     has_active_invoice, add_sold_product, get_product_quantity, reserve_product, release_product,
     get_product_by_name_city, get_product_by_id, get_purchase_with_product,
     get_api_limits, increment_api_request, reset_api_limits,
-    is_district_available, is_delivery_type_available
+    is_district_available, is_delivery_type_available,
+    add_user_referral, generate_referral_code
 )
 from ltc_hdwallet import ltc_wallet
 from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats
@@ -519,6 +520,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
         user = message.from_user
         user_id = user.id
         
+        # Проверяем есть ли реферальный код в параметрах
+        referrer_code = None
+        if len(message.text.split()) > 1:
+            referrer_code = message.text.split()[1]
+        
         if await is_banned(user_id):
             await message.answer("Вы забанены. Обратитесь к поддержке.")
             return
@@ -531,6 +537,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
                 await show_main_menu(message, state, user_id, lang)
                 await state.set_state(Form.main_menu)
                 return
+        else:
+            # Добавляем реферала если это новый пользователь
+            if referrer_code:
+                await add_user_referral(user_id, referrer_code)
         
         captcha_code = ''.join(random.choices('0123456789', k=5))
         await state.update_data(captcha=captcha_code)
@@ -596,8 +606,15 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         if not user:
             return
         
-        # Получаем актуальные кэши
-        cities_cache = get_cities_cache()
+        # Генерируем реферальный код если его нет
+        if not user.get('referral_code'):
+            referral_code = await generate_referral_code(user_id)
+        else:
+            referral_code = user['referral_code']
+        
+        # Формируем реферальную ссылку
+        bot_username = (await bot.get_me()).username
+        referral_link = f"https://t.me/{bot_username}?start={referral_code}"
         
         # Используем новый текст описания магазина
         shop_description = get_text(lang, 'main_menu_description') + "\n\n"
@@ -612,7 +629,12 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
             balance=user['balance'] or 0
         )
         
-        full_text = shop_description + user_info_text
+        # Добавляем информацию о рефералах
+        referral_info = f"\n👥 Приглашено друзей: {user.get('referral_count', 0)}"
+        referral_info += f"\n💰 Заработано с рефералов: ${user.get('earned_from_referrals', 0)}"
+        referral_info += f"\n🔗 Реферальная ссылка: {referral_link}"
+        
+        full_text = shop_description + user_info_text + referral_info
         
         builder = InlineKeyboardBuilder()
         for city in cities_cache:
@@ -676,6 +698,15 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         
         if data.startswith('city_'):
             city = data.replace('city_', '')
+            
+            # Проверяем есть ли товары в этом городе
+            products_cache = get_products_cache()
+            if city not in products_cache or not any(product_info.get('quantity', 0) > 0 for product_info in products_cache[city].values()):
+                await callback.message.answer(
+                    "🛒 Этот город пока пустой. Ожидайте пополнения. Следите за нашим каналом в ожидании пополнения."
+                )
+                return
+            
             await state.update_data(city=city)
             
             # Получаем актуальные кэши
@@ -822,17 +853,28 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         
         # Если есть изображение товара, отправляем его
         if order.get('image_url'):
-            # Удаляем предыдущее сообщение
-            state_data = await state.get_data()
-            if 'last_message_id' in state_data:
-                await safe_delete_previous_message(callback.message.chat.id, state_data['last_message_id'], state)
-            
-            sent_message = await callback.message.answer_photo(
-                photo=order['image_url'],
-                caption=order_text,
-                reply_markup=builder.as_markup(),
-                parse_mode='HTML'
-            )
+            try:
+                # Удаляем предыдущее сообщение
+                state_data = await state.get_data()
+                if 'last_message_id' in state_data:
+                    await safe_delete_previous_message(callback.message.chat.id, state_data['last_message_id'], state)
+                
+                sent_message = await callback.message.answer_photo(
+                    photo=order['image_url'],
+                    caption=order_text,
+                    reply_markup=builder.as_markup(),
+                    parse_mode='HTML'
+                )
+                await state.update_data(last_message_id=sent_message.message_id)
+            except Exception as e:
+                logger.error(f"Error sending photo: {e}")
+                # Fallback - отправляем только текст
+                sent_message = await callback.message.answer(
+                    text=order_text,
+                    reply_markup=builder.as_markup(),
+                    parse_mode='HTML'
+                )
+                await state.update_data(last_message_id=sent_message.message_id)
         else:
             # Удаляем предыдущее сообщение
             state_data = await state.get_data()
@@ -844,8 +886,8 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
                 reply_markup=builder.as_markup(),
                 parse_mode='HTML'
             )
+            await state.update_data(last_message_id=sent_message.message_id)
         
-        await state.update_data(last_message_id=sent_message.message_id)
         await callback.answer()
         
     except Exception as e:

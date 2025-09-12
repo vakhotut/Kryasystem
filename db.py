@@ -197,7 +197,7 @@ async def init_db(database_url):
             )
             ''')
             
-            # Новая таблица для товаров
+            # Новая таблица для товары
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS products (
                 id SERIAL PRIMARY KEY,
@@ -284,7 +284,7 @@ async def init_db(database_url):
             # Таблица для сгенерированных адресов
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS generated_addresses (
-                id SERIAL PRIMARY KEY,
+                id SERial PRIMARY KEY,
                 address TEXT UNIQUE NOT NULL,
                 index INTEGER NOT NULL,
                 label TEXT,
@@ -354,7 +354,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ❗️ Важная информация:
 • Минимальная сумма пополнения: $1
 • Адрес кошелька резервируется на 30 минут
-• Все пополнения на этот адрес будут зачислены на ваш баланс
+• Все пополнения на этот адрес будут зачисленны на ваш баланс
 • После истечения времени адрес освобождается''',
                 'active_invoice': '''💳 Активный инвойс
 
@@ -372,7 +372,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • 3 неудачные попытки - бан на 24 часа''',
                 'purchase_invoice': '''💳 Оплата заказа
 
-📦 Т товар: {product}
+📦 Товар: {product}
 📝 Адрес для оплаты: `{crypto_address}`
 💎 Сумма к оплате: {crypto_amount} LTC
 💰 Сумма в USD: ${amount}
@@ -537,7 +537,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
-• 3 წარუ�მატებელი მცდელობა - 24 საათიანი ბანი''',
+• 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'purchase_invoice': '''💳 შეკვეთის გადახდა
 
 📦 პროდუქტი: {product}
@@ -554,7 +554,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
-                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
+                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუ�муატებელი მცდელობები: {failed_count}/3',
                 'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
                 'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
@@ -787,7 +787,7 @@ async def load_cache():
                 }
             
             # Загрузка типов доставки
-            delivery_types = await conn.fetch('SELECT * FROM delivery_types ORDER BY name')
+            delivery_types = await conn.fetch('SELECT * FROM delivery_types ORDER by name')
             delivery_types_cache = [delivery_type['name'] for delivery_type in delivery_types]
             
             # Загрузка настроек бота
@@ -846,17 +846,8 @@ async def update_user(user_id, **kwargs):
         if not valid_updates:
             return
             
-        # Формируем SET часть запроса с правильной нумерацией параметров
-        set_parts = []
-        values = []
-        for i, (k, v) in enumerate(valid_updates.items(), start=1):
-            set_parts.append(f"{k} = ${i}")
-            values.append(v)
-        
-        # Добавляем user_id в конец списка значений
-        values.append(user_id)
-        set_clause = ", ".join(set_parts)
-        
+        # Формируем SET часть запроса с правильной нумерацией парамет
+
         async with db_pool.acquire() as conn:
             await conn.execute(
                 f'UPDATE users SET {set_clause} WHERE user_id = ${len(values)}',
@@ -881,7 +872,7 @@ async def add_purchase(user_id, product, price, district, delivery_type, product
             # Преобразуем product_id в строку если он не None
             product_id_str = str(product_id) if product_id is not None else None
             
-            # Атомарное обновление счетчика покупок и возврат ID покупки
+            # Атомарное обновление счетчика покупки и возврат ID покупки
             purchase_id = await conn.fetchval('''
             INSERT INTO purchases (user_id, product, price, district, delivery_type, product_id, image_url, description)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1074,13 +1065,60 @@ async def release_subcategory(subcategory_id, quantity=1):
     try:
         async with db_pool.acquire() as conn:
             await conn.execute('''
-                                UPDATE subcategories 
+                UPDATE subcategories 
                 SET quantity = quantity + $1 
                 WHERE id = $2
             ''', quantity, subcategory_id)
             return True
     except Exception as e:
         logger.error(f"Error releasing subcategory: {e}")
+        return False
+
+# Добавляем недостающие функции
+async def get_product_quantity(product_id):
+    try:
+        async with db_pool.acquire() as conn:
+            # Получаем количество товара через его подкатегорию
+            return await conn.fetchval('''
+                SELECT s.quantity 
+                FROM products p
+                JOIN subcategories s ON p.subcategory_id = s.id
+                WHERE p.id = $1
+            ''', product_id)
+    except Exception as e:
+        logger.error(f"Error getting product quantity: {e}")
+        return 0
+
+async def reserve_product(product_id):
+    """Резервирование товара (уменьшение количества на 1)"""
+    try:
+        async with db_pool.acquire() as conn:
+            # Получаем subcategory_id продукта
+            subcategory_id = await conn.fetchval(
+                'SELECT subcategory_id FROM products WHERE id = $1',
+                product_id
+            )
+            if subcategory_id:
+                return await reserve_subcategory(subcategory_id, 1)
+            return False
+    except Exception as e:
+        logger.error(f"Error reserving product: {e}")
+        return False
+
+async def release_product(product_id):
+    """Освобождение товара (увеличение количества на 1)"""
+    try:
+        async with db_pool.acquire() as conn:
+            # Получаем subcategory_id продукта
+            subcategory_id = await conn.fetchval(
+                'SELECT subcategory_id FROM products WHERE id = $1',
+                product_id
+            )
+            if subcategory_id:
+                return await release_subcategory(subcategory_id, 1)
+            return False
+    except Exception as e:
+        logger.error(f"Error releasing product: {e}")
         return False
 
 async def get_product_by_name_city(product_name, city_name):

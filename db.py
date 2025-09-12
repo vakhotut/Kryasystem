@@ -226,13 +226,30 @@ async def init_db(database_url):
             
             # Таблица для хранения статистики использования API
             await conn.execute('''
-            CREATE TABLE IF NOT EXISTS api_usage_stats (
+            CREATE TABLE IF NOT EXISTS explorer_api_stats (
                 id SERIAL PRIMARY KEY,
-                api_name TEXT NOT NULL,
-                requests_count INTEGER DEFAULT 0,
-                last_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                explorer_name TEXT NOT NULL,
+                total_requests INTEGER DEFAULT 0,
+                successful_requests INTEGER DEFAULT 0,
+                last_used TIMESTAMP NULL,
                 daily_limit INTEGER DEFAULT 1000,
-                UNIQUE(api_name)
+                remaining_daily_requests INTEGER DEFAULT 1000,
+                last_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(explorer_name)
+            )
+            ''')
+            
+            # Таблица для сгенерированных адресов
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS generated_addresses (
+                id SERIAL PRIMARY KEY,
+                address TEXT UNIQUE NOT NULL,
+                index INTEGER NOT NULL,
+                label TEXT,
+                balance REAL DEFAULT 0.0,
+                transaction_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
             
@@ -490,7 +507,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 ⚠️ მნიშვნელოვანი:
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
-• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
+• გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუ�муატებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
@@ -535,13 +552,13 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
             ''', key, value)
         
         # Добавляем начальные данные для API
-        apis = ['nownodes', 'blockcypher', 'blockchair', 'coingecko', 'binance', 'coinbase', 'kraken', 'tsanghi']
+        apis = ['blockchair', 'nownodes', 'sochain', 'coingecko', 'binance', 'okx', 'kraken']
         for api in apis:
             await conn.execute('''
-            INSERT INTO api_usage_stats (api_name, requests_count, daily_limit)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (api_name) DO NOTHING
-            ''', api, 0, 1000)
+            INSERT INTO explorer_api_stats (explorer_name, total_requests, successful_requests, daily_limit, remaining_daily_requests)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (explorer_name) DO NOTHING
+            ''', api, 0, 0, API_REAL_LIMITS.get(api, {}).get('requests_per_day', 1000), API_REAL_LIMITS.get(api, {}).get('requests_per_day', 1000))
         
         # Проверяем и добавляем города
         cities_count = await conn.fetchval('SELECT COUNT(*) FROM cities')
@@ -1015,9 +1032,9 @@ async def increment_api_request(api_name):
     try:
         async with db_pool.acquire() as conn:
             await conn.execute('''
-            UPDATE api_usage_stats 
-            SET requests_count = requests_count + 1 
-            WHERE api_name = $1
+            UPDATE explorer_api_stats 
+            SET total_requests = total_requests + 1 
+            WHERE explorer_name = $1
             ''', api_name)
     except Exception as e:
         logger.error(f"Error incrementing API request count for {api_name}: {e}")
@@ -1025,7 +1042,7 @@ async def increment_api_request(api_name):
 async def get_api_limits():
     try:
         async with db_pool.acquire() as conn:
-            return await conn.fetch('SELECT * FROM api_usage_stats')
+            return await conn.fetch('SELECT * FROM explorer_api_stats')
     except Exception as e:
         logger.error(f"Error getting API limits: {e}")
         return []
@@ -1034,9 +1051,131 @@ async def reset_api_limits():
     try:
         async with db_pool.acquire() as conn:
             await conn.execute('''
-            UPDATE api_usage_stats 
+            UPDATE explorer_api_stats 
             SET requests_count = 0, last_reset = CURRENT_TIMESTAMP
             WHERE last_reset < CURRENT_DATE
             ''')
     except Exception as e:
         logger.error(f"Error resetting API limits: {e}")
+
+# Функции для работы с сгенерированными адресами
+async def add_generated_address(address, index, label=None):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO generated_addresses (address, index, label)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (address) DO UPDATE SET label = EXCLUDED.label
+            ''', address, index, label)
+            return True
+    except Exception as e:
+        logger.error(f"Error adding generated address: {e}")
+        return False
+
+async def update_address_balance(address, balance, transaction_count):
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE generated_addresses 
+                SET balance = $1, transaction_count = $2 
+                WHERE address = $3
+            ''', balance, transaction_count, address)
+            return True
+    except Exception as e:
+        logger.error(f"Error updating address balance: {e}")
+        return False
+
+async def get_generated_addresses(limit=50, offset=0):
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetch('''
+                SELECT * FROM generated_addresses 
+                ORDER BY created_at DESC 
+                LIMIT $1 OFFSET $2
+            ''', limit, offset)
+    except Exception as e:
+        logger.error(f"Error getting generated addresses: {e}")
+        return []
+
+async def update_api_limits(explorer_name, daily_limit):
+    """Обновление дневного лимита для API"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE explorer_api_stats 
+                SET daily_limit = $1,
+                    remaining_daily_requests = LEAST(remaining_daily_requests, $1),
+                    updated_at = NOW()
+                WHERE explorer_name = $2
+            ''', daily_limit, explorer_name)
+            
+            # Обновляем кэш
+            if explorer_name in SYSTEM_STATUS.get('api_services', {}):
+                SYSTEM_STATUS['api_services'][explorer_name]['daily_limit'] = daily_limit
+                SYSTEM_STATUS['api_services'][explorer_name]['remaining_requests'] = min(
+                    SYSTEM_STATUS['api_services'][explorer_name]['remaining_requests'],
+                    daily_limit
+                )
+        
+        return True
+    except Exception as e:
+        logging.error(f"Error updating API limits for {explorer_name}: {e}")
+        return False
+
+async def reset_daily_limits():
+    """Ежедневный сброс лимитов API"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE explorer_api_stats 
+                SET remaining_daily_requests = daily_limit,
+                    last_reset = NOW()
+                WHERE last_reset < CURRENT_DATE OR last_reset IS NULL
+            ''')
+            
+            # Обновляем кэш
+            for service_name in SYSTEM_STATUS.get('api_services', {}):
+                service_data = SYSTEM_STATUS['api_services'][service_name]
+                service_data['remaining_requests'] = service_data['daily_limit']
+        
+        logging.info("Daily API limits reset successfully")
+        return True
+    except Exception as e:
+        logging.error(f"Error resetting daily limits: {e}")
+        return False
+
+async def get_api_config():
+    """Получение конфигурации API из базы данных"""
+    try:
+        async with db_pool.acquire() as conn:
+            settings = await conn.fetch("SELECT key, value FROM bot_settings WHERE key LIKE '%api%'")
+            
+            api_config = {}
+            for setting in settings:
+                if 'blockchair' in setting['key'].lower():
+                    api_config['blockchair_key'] = setting['value']
+                elif 'nownodes' in setting['key'].lower():
+                    api_config['nownodes_key'] = setting['value']
+                elif 'coingecko' in setting['key'].lower():
+                    api_config['coingecko_key'] = setting['value']
+            
+            return api_config
+    except Exception as e:
+        logging.error(f"Error getting API config: {e}")
+        return {}
+
+async def update_api_config(key, value):
+    """Обновление конфигурации API в базе данных"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO bot_settings (key, value)
+                VALUES ($1, $2)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            ''', key, value)
+        
+        logging.info(f"API config updated: {key}")
+        return True
+    except Exception as e:
+        logging.error(f"Error updating API config: {e}")
+        return False

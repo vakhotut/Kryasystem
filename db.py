@@ -540,7 +540,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
 • 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
-                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
+                'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუ�მატებელი მცდელობები: {failed_count}/3',
                 'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
                 'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
@@ -1414,3 +1414,72 @@ async def generate_referral_code(user_id):
     except Exception as e:
         logger.error(f"Error generating referral code: {e}")
         return None
+
+# Добавленные функции для работы с количеством товаров
+async def get_product_quantity(product_id):
+    """Получить количество товара по его ID"""
+    try:
+        async with db_pool.acquire() as conn:
+            # Сначала получаем subcategory_id из продукта
+            subcategory_id = await conn.fetchval(
+                'SELECT subcategory_id FROM products WHERE id = $1', 
+                product_id
+            )
+            if not subcategory_id:
+                return 0
+                
+            # Затем получаем количество из подкатегории
+            return await conn.fetchval(
+                'SELECT quantity FROM subcategories WHERE id = $1',
+                subcategory_id
+            )
+    except Exception as e:
+        logger.error(f"Error getting product quantity: {e}")
+        return 0
+
+async def reserve_product(product_id):
+    """Забронировать товар (уменьшить количество на 1)"""
+    try:
+        async with db_pool.acquire() as conn:
+            # Получаем subcategory_id продукта
+            subcategory_id = await conn.fetchval(
+                'SELECT subcategory_id FROM products WHERE id = $1',
+                product_id
+            )
+            if not subcategory_id:
+                return False
+                
+            # Уменьшаем количество в подкатегории
+            result = await conn.execute('''
+                UPDATE subcategories 
+                SET quantity = quantity - 1 
+                WHERE id = $1 AND quantity > 0
+            ''', subcategory_id)
+            
+            return "UPDATE 1" in str(result)
+    except Exception as e:
+        logger.error(f"Error reserving product: {e}")
+        return False
+
+async def release_product(product_id):
+    """Вернуть товар (увеличить количество на 1)"""
+    try:
+        async with db_pool.acquire() as conn:
+            # Получаем subcategory_id продукта
+            subcategory_id = await conn.fetchval(
+                'SELECT subcategory_id FROM products WHERE id = $1',
+                product_id
+            )
+            if not subcategory_id:
+                return False
+                
+            # Увеличиваем количество в подкатегории
+            await conn.execute('''
+                UPDATE subcategories 
+                SET quantity = quantity + 1 
+                WHERE id = $1
+            ''', subcategory_id)
+            return True
+    except Exception as e:
+        logger.error(f"Error releasing product: {e}")
+        return False

@@ -13,7 +13,8 @@ db_pool: Pool = None
 # Белый список разрешенных колонки для обновления
 ALLOWED_USER_COLUMNS = {
     'username', 'first_name', 'language', 'captcha_passed',
-    'ban_until', 'failed_payments', 'purchase_count', 'discount', 'balance'
+    'ban_until', 'failed_payments', 'purchase_count', 'discount', 'balance',
+    'referrer_id', 'referral_code', 'referral_count', 'earned_from_referrals'
 }
 
 # Глобальные кэши
@@ -47,7 +48,12 @@ async def init_db(database_url):
                 purchase_count INTEGER DEFAULT 0,
                 discount INTEGER DEFAULT 0,
                 balance REAL DEFAULT 0.0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                referrer_id BIGINT NULL,
+                referral_code TEXT UNIQUE,
+                referral_count INTEGER DEFAULT 0,
+                earned_from_referrals REAL DEFAULT 0.0,
+                FOREIGN KEY (referrer_id) REFERENCES users (user_id)
             )
             ''')
             
@@ -1369,3 +1375,42 @@ async def delete_subcategory(subcategory_id):
     except Exception as e:
         logger.error(f"Error deleting subcategory {subcategory_id}: {e}")
         return False
+
+# Функции для работы с реферальной системой
+async def add_user_referral(user_id, referrer_code=None):
+    try:
+        async with db_pool.acquire() as conn:
+            # Если есть реферальный код, находим того кто пригласил
+            if referrer_code:
+                referrer = await conn.fetchrow(
+                    'SELECT user_id FROM users WHERE referral_code = $1', 
+                    referrer_code
+                )
+                if referrer:
+                    await conn.execute(
+                        'UPDATE users SET referrer_id = $1 WHERE user_id = $2',
+                        referrer['user_id'], user_id
+                    )
+                    # Начисляем 1$ пригласившему сразу
+                    await conn.execute(
+                        'UPDATE users SET balance = balance + 1, earned_from_referrals = earned_from_referrals + 1, referral_count = referral_count + 1 WHERE user_id = $1',
+                        referrer['user_id']
+                    )
+                    return True
+        return False
+    except Exception as e:
+        logger.error(f"Error adding referral: {e}")
+        return False
+
+async def generate_referral_code(user_id):
+    try:
+        code = str(uuid.uuid4())[:8].upper()
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET referral_code = $1 WHERE user_id = $2',
+                code, user_id
+            )
+        return code
+    except Exception as e:
+        logger.error(f"Error generating referral code: {e}")
+        return None

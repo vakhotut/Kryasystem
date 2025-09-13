@@ -253,7 +253,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 logger.error(f"Error in invoice notification loop: {e}")
                 await asyncio.sleep(60)
     
-    # Запускаем задачу и сохраняем ссылку для отмены
+    # Запускаем задачу и сохраняем ссылку для отменя
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -464,24 +464,30 @@ async def process_successful_payment(transaction):
                     product_info['description'] if product_info else None
                 )
                 
-                if purchase_id and product_id:
+                if purchase_id and product_id and product_info:
                     # Добавляем запись о проданном товаре
-                    await add_sold_product(product_id, user_id, 1, transaction['amount'], purchase_id)
+                    await add_sold_product(
+                        product_id, 
+                        product_info['subcategory_id'], 
+                        user_id, 
+                        1, 
+                        transaction['amount'], 
+                        purchase_id
+                    )
                     
                     # Получаем информацию о товаре для отправки
-                    if product_info:
-                        caption = f"{product_info['name']}\n\n{product_info['description']}\n\nЦена: ${transaction['amount']}"
-                        if product_info['image_url']:
-                            await bot.send_photo(
-                                chat_id=user_id,
-                                photo=product_info['image_url'],
-                                caption=caption
-                            )
-                        else:
-                            await bot.send_message(
-                                chat_id=user_id,
-                                text=caption
-                            )
+                    caption = f"{product_info['name']}\n\n{product_info['description']}\n\nЦена: ${transaction['amount']}"
+                    if product_info['image_url']:
+                        await bot.send_photo(
+                            chat_id=user_id,
+                            photo=product_info['image_url'],
+                            caption=caption
+                        )
+                    else:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=caption
+                        )
         
         # Если это пополнение баланса, обновляем баланс
         else:
@@ -1351,7 +1357,12 @@ async def pay_with_balance(callback: types.CallbackQuery, state: FSMContext):
                 if purchase_id:
                     # Добавляем запись о проданном товаре
                     await add_sold_product(
-                        product_row['id'], user_id, 1, price, purchase_id
+                        product_row['id'], 
+                        product_row['subcategory_id'],  # Добавлен subcategory_id
+                        user_id, 
+                        1, 
+                        price, 
+                        purchase_id
                     )
             
             # Уведомляем пользователя

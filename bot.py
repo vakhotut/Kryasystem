@@ -17,6 +17,8 @@ from aiogram.types import InlineKeyboardButton
 from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramBadRequest, TelegramNetworkError
 import aiohttp
 import traceback
+from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
 
 from db import (
     init_db, get_user, update_user, add_transaction, add_purchase, 
@@ -43,7 +45,6 @@ logger = logging.getLogger(__name__)
 # Настройки бота
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.environ.get('DATABASE_URL')
-ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
 
 # Глобальные переменные для управления временными интервалами
 LAST_RATE_UPDATE = 0
@@ -86,8 +87,7 @@ BOT_SETTINGS = {
     'support_link': "https://t.me/your_support",
     'channel_link': "https://t.me/your_channel",
     'reviews_link': "https://t.me/your_reviews",
-    'website_link': "https://yourwebsite.com",
-    'personal_bot_link': "https://t.me/your_bot"
+    'website_link': "https://yourwebsite.com"
 }
 
 # Доступные криптовалюты (только LTC)
@@ -98,6 +98,34 @@ CRYPTO_CURRENCIES = {
 # Функция для получения настроек (в будущем можно заменить на загрузку из БД)
 def get_bot_setting(key):
     return BOT_SETTINGS.get(key, "")
+
+# Функция для генерации капчи в виде изображения
+def generate_captcha_image(text):
+    # Создаем изображение
+    width, height = 200, 100
+    image = Image.new('RGB', (width, height), color=(255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    
+    # Используем стандартный шрифт или загружаем свой
+    try:
+        font = ImageFont.truetype("arial.ttf", 36)
+    except:
+        font = ImageFont.load_default()
+    
+    # Рисуем текст
+    draw.text((10, 10), text, fill=(0, 0, 0), font=font)
+    
+    # Добавляем немного шума
+    for _ in range(100):
+        x = random.randint(0, width-1)
+        y = random.randint(0, height-1)
+        draw.point((x, y), fill=(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)))
+    
+    # Сохраняем в буфер
+    buf = BytesIO()
+    image.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
 
 # Проверка на единственный экземпляр бота
 def singleton_check():
@@ -268,7 +296,7 @@ async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
         
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="topup_balance"))
-        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+        builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
         
         # Используем функцию для показа меню с изображением
         await show_menu_with_image(
@@ -293,7 +321,7 @@ async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMCont
         
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="LTC", callback_data="topup_ltc"))
-        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_balance_menu"))
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_balance_menu"))
         
         # Используем функцию для показа меню с изображением
         await show_menu_with_image(
@@ -343,7 +371,7 @@ async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, 
                 InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_invoice"),
                 InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_invoice")
             )
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+            builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
             
             # Запускаем таймер уведомлений для этого инвойса
             asyncio.create_task(invoice_notification_loop(user_id, invoice['order_id'], lang))
@@ -548,16 +576,48 @@ async def cmd_start(message: types.Message, state: FSMContext):
             if referrer_code:
                 await add_user_referral(user_id, referrer_code)
         
-        captcha_code = ''.join(random.choices('0123456789', k=5))
-        await state.update_data(captcha=captcha_code)
-        
-        await message.answer(
-            get_text('ru', 'captcha', code=captcha_code)
+        # Сначала показываем выбор языка
+        builder = InlineKeyboardBuilder()
+        builder.add(
+            InlineKeyboardButton(text="Русский", callback_data='lang_ru'),
+            InlineKeyboardButton(text="English", callback_data='lang_en'),
+            InlineKeyboardButton(text="ქართული", callback_data='lang_ka')
         )
-        await state.set_state(Form.captcha)
+        builder.adjust(1)
+        
+        await message.answer('Выберите язык / Select language / აირჩიეთ ენა:', reply_markup=builder.as_markup())
+        await state.set_state(Form.language)
     except Exception as e:
         logger.error(f"Error in start command: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
+
+@dp.callback_query(Form.language)
+async def process_language(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        user_id = callback.from_user.id
+        lang_code = callback.data.replace('lang_', '')
+        
+        await update_user(user_id, language=lang_code)
+        
+        await callback.answer()
+        await callback.message.edit_text(text=get_text(lang_code, 'language_selected'))
+        
+        # Генерируем капчу
+        captcha_code = ''.join(random.choices('0123456789', k=5))
+        await state.update_data(captcha=captcha_code)
+        
+        # Генерируем изображение капчи
+        captcha_image = generate_captcha_image(captcha_code)
+        
+        # Отправляем изображение капчи
+        await callback.message.answer_photo(
+            photo=captcha_image,
+            caption=get_text(lang_code, 'captcha_enter')
+        )
+        await state.set_state(Form.captcha)
+    except Exception as e:
+        logger.error(f"Error processing language: {e}")
+        await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.message(Form.captcha)
 async def process_captcha(message: types.Message, state: FSMContext):
@@ -573,38 +633,18 @@ async def process_captcha(message: types.Message, state: FSMContext):
                     user.id, user.username, user.first_name, 1, 1
                 )
             
-            builder = InlineKeyboardBuilder()
-            builder.add(
-                InlineKeyboardButton(text="Русский", callback_data='ru'),
-                InlineKeyboardButton(text="English", callback_data='en'),
-                InlineKeyboardButton(text="ქართული", callback_data='ka')
-            )
-            builder.adjust(1)
-            
-            await message.answer('Выберите язык / Select language / აირჩიეთ ენა:', reply_markup=builder.as_markup())
-            await state.set_state(Form.language)
+            user_data = await get_user(user.id)
+            lang = user_data['language'] or 'ru'
+            await message.answer(get_text(lang, 'captcha_success'))
+            await show_main_menu(message, state, user.id, lang)
+            await state.set_state(Form.main_menu)
         else:
-            await message.answer(get_text('ru', 'captcha_failed'))
+            user_data = await get_user(user.id)
+            lang = user_data['language'] or 'ru'
+            await message.answer(get_text(lang, 'captcha_failed'))
     except Exception as e:
         logger.error(f"Error processing captcha: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
-
-@dp.callback_query(Form.language)
-async def process_language(callback: types.CallbackQuery, state: FSMContext):
-    try:
-        user_id = callback.from_user.id
-        lang_code = callback.data
-        
-        await update_user(user_id, language=lang_code)
-        
-        await callback.answer()
-        await callback.message.edit_text(text=get_text(lang_code, 'language_selected'))
-        
-        await show_main_menu(callback.message, state, user_id, lang_code)
-        await state.set_state(Form.main_menu)
-    except Exception as e:
-        logger.error(f"Error processing language: {e}")
-        await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 async def show_main_menu(message: types.Message, state: FSMContext, user_id: int, lang: str):
     try:
@@ -663,7 +703,7 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         builder.row(InlineKeyboardButton(text="📢 Наш канал", url=get_bot_setting('channel_link')))
         builder.row(InlineKeyboardButton(text="⭐ Отзывы", url=get_bot_setting('reviews_link')))
         builder.row(InlineKeyboardButton(text="🌐 Наш сайт", url=get_bot_setting('website_link')))
-        builder.row(InlineKeyboardButton(text="🤖 Личный бот", url=get_bot_setting('personal_bot_link')))
+        builder.row(InlineKeyboardButton(text="🌐 Смена языка", callback_data="change_language"))
         
         # Используем функцию для показа меню с изображением
         await show_menu_with_image(
@@ -722,7 +762,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             builder = InlineKeyboardBuilder()
             for category in categories_cache:
                 builder.row(InlineKeyboardButton(text=category['name'], callback_data=f"cat_{category['name']}"))
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+            builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
             
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
@@ -758,10 +798,19 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         elif data == 'website':
             # Открываем ссылку на сайт
             await callback.message.answer("Переходим на сайт...")
-        elif data == 'personal_bot':
-            # Открываем ссылку на личного бота
-            await callback.message.answer("Переходим к личному боту...")
-        elif data == 'back_to_main':
+        elif data == 'change_language':
+            # Показываем выбор языка
+            builder = InlineKeyboardBuilder()
+            builder.add(
+                InlineKeyboardButton(text="Русский", callback_data='lang_ru'),
+                InlineKeyboardButton(text="English", callback_data='lang_en'),
+                InlineKeyboardButton(text="ქართული", callback_data='lang_ka')
+            )
+            builder.adjust(1)
+            
+            await callback.message.answer('Выберите язык / Select language / აირჩიეთ ენა:', reply_markup=builder.as_markup())
+            await state.set_state(Form.language)
+        elif data == 'main_menu':
             await show_main_menu(callback.message, state, user_id, lang)
             await state.set_state(Form.main_menu)
     except Exception as e:
@@ -804,7 +853,7 @@ async def show_order_history(callback: types.CallbackQuery, state: FSMContext):
             ))
         
         # Добавляем кнопку возврата
-        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+        builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
         
         # Удаляем предыдущее сообщение если есть
         state_data = await state.get_data()
@@ -831,7 +880,10 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         order_id = int(callback.data.replace("view_order_", ""))
         
         # Получаем информацию о заказе
-        order = await get_purchase_with_product(order_id)
+        async with db_pool.acquire() as conn:
+            order = await conn.fetchrow(
+                "SELECT * FROM purchases WHERE id = $1", order_id
+            )
         
         if not order:
             await callback.answer("Заказ не найден")
@@ -857,6 +909,7 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         # Создаем клавиатуру
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="⬅️ Назад к истории", callback_data="order_history"))
+        builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
         
         # Если есть изображение товара, отправляем его
         if order.get('image_url'):
@@ -914,7 +967,7 @@ async def process_balance_menu(callback: types.CallbackQuery, state: FSMContext)
         if data == 'topup_balance':
             await show_topup_currency_menu(callback, state)
             await state.set_state(Form.topup_currency)
-        elif data == 'back_to_main':
+        elif data == 'main_menu':
             await show_main_menu(callback.message, state, user_id, lang)
             await state.set_state(Form.main_menu)
     except Exception as e:
@@ -957,7 +1010,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
         if 'last_message_id' in state_data:
             await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
         
-        if data == 'back_to_main':
+        if data == 'main_menu':
             await show_main_menu(callback.message, state, user_id, lang)
             await state.set_state(Form.main_menu)
             return
@@ -995,7 +1048,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
         for product_name in category_products.keys():
             price = category_products[product_name]['price']
             builder.row(InlineKeyboardButton(text=f"{product_name} - ${price}", callback_data=f"prod_{product_name}"))
-        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_city"))
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_city"))
         
         # Используем функцию для показа меню с изображением
         await show_menu_with_image(
@@ -1034,7 +1087,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             builder = InlineKeyboardBuilder()
             for category in categories_cache:
                 builder.row(InlineKeyboardButton(text=category['name'], callback_data=f"cat_{category['name']}"))
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_main"))
+            builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
             
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
@@ -1083,7 +1136,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             builder = InlineKeyboardBuilder()
             for district in districts:
                 builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_category"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_category"))
             
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
@@ -1114,7 +1167,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             builder = InlineKeyboardBuilder()
             for del_type in delivery_types:
                 builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_district"))
             
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
@@ -1156,7 +1209,7 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
             builder = InlineKeyboardBuilder()
             for district in districts:
                 builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_category"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_category"))
             
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
@@ -1199,7 +1252,7 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"))
         builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
-        builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_delivery"))
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_delivery"))
         
         # Используем функцию для показа меню с изображением
         await show_menu_with_image(
@@ -1238,7 +1291,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             builder = InlineKeyboardBuilder()
             for del_type in delivery_types:
                 builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_district"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_district"))
             
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
@@ -1276,7 +1329,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             
             # Добавляем кнопки криптовалют
             builder.row(InlineKeyboardButton(text="LTC", callback_data="crypto_LTC"))
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_confirmation"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_confirmation"))
             
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
@@ -1430,7 +1483,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             builder = InlineKeyboardBuilder()
             builder.row(InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"))
             builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_delivery"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_delivery"))
             
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
@@ -1656,7 +1709,7 @@ async def process_balance(message: types.Message, state: FSMContext):
                 InlineKeyboardButton(text="✅ Проверить", callback_data="check_invoice"),
                 InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_invoice")
             )
-            builder.row(InlineKeyboardButton(text=get_text(lang, 'back'), callback_data="back_to_topup_menu"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_topup_menu"))
             
             try:
                 await message.answer_photo(
@@ -1784,47 +1837,6 @@ async def back_to_topup_menu(callback: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.error(f"Error going back to topup menu: {e}")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
-
-@dp.message(Command("menu"))
-async def cmd_menu(message: types.Message, state: FSMContext):
-    try:
-        user_id = message.from_user.id
-        user_data = await get_user(user_id)
-        lang = user_data['language'] or 'ru'
-        await show_main_menu(message, state, user_id, lang)
-        await state.set_state(Form.main_menu)
-    except Exception as e:
-        logger.error(f"Error in menu command: {e}")
-        await message.answer("Произошла ошибка. Попробуйте позже.")
-
-@dp.message(Command("api_status"))
-async def cmd_api_status(message: types.Message):
-    """Показывает статус API лимитов (только для администраторов)"""
-    try:
-        user_id = message.from_user.id
-        if user_id not in ADMIN_IDS:
-            await message.answer("❌ У вас нет прав для выполнения этой команды.")
-            return
-        
-        api_stats = await get_api_limits()
-        response = "📊 Статус API лимитов:\n\n"
-        
-        for stat in api_stats:
-            remaining = stat['daily_limit'] - stat['requests_count']
-            response += f"{stat['api_name']}: {stat['requests_count']}/{stat['daily_limit']} (осталось: {remaining})\n"
-        
-        # Добавляем информацию о ключах
-        key_stats = get_key_usage_stats()
-        response += f"\n🔑 Nownodes ключей: {key_stats['nownodes_keys_count']}\n"
-        response += f"🔑 BlockCypher ключей: {key_stats['blockcypher_keys_count']}\n"
-        response += f"🌐 Electrum серверов: {key_stats['electrum_servers_mainnet']} mainnet, {key_stats['electrum_servers_testnet']} testnet\n"
-        response += f"💾 Кеш адресов: {key_stats['cache_size']}\n"
-        response += f"💱 Кеш курсов: {key_stats['rate_cache_size']}"
-        
-        await message.answer(response)
-    except Exception as e:
-        logger.error(f"Error showing API status: {e}")
-        await message.answer("Ошибка при получении статуса API")
 
 @dp.message(F.text)
 async def handle_text(message: types.Message, state: FSMContext):

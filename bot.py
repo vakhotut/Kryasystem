@@ -542,7 +542,7 @@ async def reset_api_limits_loop():
             await reset_api_limits()
             await asyncio.sleep(86400)  # 24 часа
         except Exception as e:
-        logger.error(f"Error resetting API limits: {e}")
+            logger.error(f"Error resetting API limits: {e}")
             await asyncio.sleep(3600)  # Повторяем через час при ошибке
 
 # Обработчики команд и состояний

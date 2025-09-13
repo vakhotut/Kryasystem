@@ -281,7 +281,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 logger.error(f"Error in invoice notification loop: {e}")
                 await asyncio.sleep(60)
     
-    # Запускаем задачу и сохраняем ссылку для отмены
+    # Запускаем задачу и сохраняем ссылку для отмена
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -542,7 +542,7 @@ async def reset_api_limits_loop():
             await reset_api_limits()
             await asyncio.sleep(86400)  # 24 часа
         except Exception as e:
-            logger.error(f"Error resetting API limits: {e}")
+        logger.error(f"Error resetting API limits: {e}")
             await asyncio.sleep(3600)  # Повторяем через час при ошибке
 
 # Обработчики команд и состояний
@@ -600,7 +600,8 @@ async def process_language(callback: types.CallbackQuery, state: FSMContext):
         await update_user(user_id, language=lang_code)
         
         await callback.answer()
-        await callback.message.edit_text(text=get_text(lang_code, 'language_selected'))
+        # Отправляем новое сообщение вместо редактирования
+        await callback.message.answer(text=get_text(lang_code, 'language_selected'))
         
         # Генерируем капчу
         captcha_code = ''.join(random.choices('0123456789', k=5))
@@ -610,13 +611,22 @@ async def process_language(callback: types.CallbackQuery, state: FSMContext):
         captcha_image = generate_captcha_image(captcha_code)
         
         # Отправляем изображение капчи
-        await callback.message.answer_photo(
-            photo=captcha_image,
-            caption=get_text(lang_code, 'captcha_enter')
-        )
+        try:
+            await callback.message.answer_photo(
+                photo=captcha_image,
+                caption=get_text(lang_code, 'captcha_enter')
+            )
+        except Exception as e:
+            logger.error(f"Error sending captcha image: {e}")
+            # Fallback: отправляем капчу текстом
+            await callback.message.answer(
+                text=f"{get_text(lang_code, 'captcha_enter')}\n\nКод: {captcha_code}"
+            )
+        
         await state.set_state(Form.captcha)
     except Exception as e:
         logger.error(f"Error processing language: {e}")
+        logger.error(traceback.format_exc())
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.message(Form.captcha)

@@ -1236,7 +1236,7 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         delivery_type = data.replace('del_', '')
         
         # Проверяем доступность типа доставки
-        if not await is_delivery_type_available(delivery_type):
+        if not await is_delivery_type_available(del_type):
             sent_message = await callback.message.answer(
                 text="Этот тип доставки временно недоступен"
             )
@@ -1511,201 +1511,6 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         if data == 'crypto_LTC':
             state_data = await state.get_data()
             city = state_data.get('city')
-                        state_data = await state.get_data()
-            city = state_data.get('city')
-            product_name = state_data.get('product')
-            price = state_data.get('price')
-            district = state_data.get('district')
-            delivery_type = state_data.get('delivery_type')
-            
-            product_info = f"{product_name} в {city}, район {district}, {delivery_type}"
-            
-            order_id = f"order_{int(time.time())}_{user_id}"
-            ltc_rate = await get_ltc_usd_rate_cached()
-            amount_ltc = price / ltc_rate
-            
-            # Получаем product_id для добавления в sold_products после оплаты
-            async with db_pool.acquire() as conn:
-                product_row = await conn.fetchrow(
-                    "SELECT * FROM products WHERE name = $1 AND city_id = (SELECT id FROM cities WHERE name = $2) LIMIT 1",
-                    product_name, city
-                )
-                
-                if not product_row:
-                    await callback.message.answer("Ошибка: товар не найден")
-                    return
-                
-                # Проверяем доступное количество
-                if product_row['quantity'] <= 0:
-                    await callback.message.answer(get_text(lang, 'product_out_of_stock'))
-@dp.callback_query(Form.crypto_currency)
-async def process_crypto_currency(callback: types.CallbackQuery, state: FSMContext):
-    try:
-        await callback.answer()
-        
-        user_id = callback.from_user.id
-        user_data = await get_user(user_id)
-        lang = user_data['language'] or 'ru'
-        data = callback.data
-        
-        state_data = await state.get_data()
-        if 'last_message_id' in state_data:
-            await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
-        
-        if data == 'back_to_confirmation':
-            state_data = await state.get_data()
-            city = state_data.get('city')
-            product = state_data.get('product')
-            price = state_data.get('price')
-            district = state_data.get('district')
-            delivery_type = state_data.get('delivery_type')
-            
-            order_text = get_text(
-                lang, 
-                'order_summary',
-                product=product,
-                price=price,
-                district=district,
-                delivery_type=delivery_type
-            )
-            
-            builder = InlineKeyboardBuilder()
-            builder.row(InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"))
-            builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
-            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_delivery"))
-            
-            # Используем функцию для показа меню с изображением
-            await show_menu_with_image(
-                callback.message,
-                order_text,
-                builder.as_markup(),
-                get_bot_setting('confirmation_menu_image'),
-                state
-            )
-            await state.set_state(Form.confirmation)
-            return
-        
-        # Для LTC
-        if data == 'crypto_LTC':
-            state_data = await state.get_data()
-            city = state_data.get('city')
-            product_name = state_data.get('product')
-            price = state_data.get('price')
-            district = state_data.get('district')
-            delivery_type = state_data.get('delivery_type')
-            
-            product_info = f"{product_name} в {city}, район {district}, {delivery_type}"
-            
-            order_id = f"order_{int(time.time())}_{user_id}"
-            ltc_rate = await get_ltc_usd_rate_cached()
-            amount_ltc = price / ltc_rate
-            
-            # Получаем product_id для добавления в sold_products после оплаты
-            async with db_pool.acquire() as conn:
-                product_row = await conn.fetchrow(
-                    "SELECT * FROM products WHERE name = $1 AND city_id = (SELECT id FROM cities WHERE name = $2) LIMIT 1",
-                    product_name, city
-                )
-                
-                if not product_row:
-                    await callback.message.answer("Ошибка: товар не найден")
-                    return
-                
-                # Проверяем доступное количество
-                if product_row['quantity'] <= 0:
-                    await callback.message.answer(get_text(lang, 'product_out_of_stock'))
-                    return
-
-                # Бронируем товар
-                if not await reserve_product(product_row['id']):
-                    await callback.message.answer(get_text(lang, 'product_out_of_stock'))
-                    return
-
-                product_id = product_row['id']
-            
-            try:
-                address_data = ltc_wallet.generate_address()
-            except Exception as e:
-                logger.error(f"Error generating LTC address: {e}")
-                await callback.message.answer(get_text(lang, 'error'))
-                return
-            
-            qr_code = ltc_wallet.get_qr_code(address_data['address'], amount_ltc)
-            expires_at = datetime.now() + timedelta(minutes=30)
-            
-            await add_transaction(
-                user_id,
-                price,
-                'LTC',
-                order_id,
-                qr_code,
-                expires_at,
-                product_info,
-                order_id,
-                address_data['address'],
-                amount_ltc,
-                product_id
-            )
-            
-            # Сохраняем product_id в state для использования после оплаты
-            await state.update_data(product_id=product_id)
-            
-            # Новый формат текста для покупки
-            expires_time = expires_at.strftime("%d.%m.%Y, %H:%M:%S")
-            time_left = expires_at - datetime.now()
-            time_left_str = f"{int(time_left.total_seconds() // 60)} мин {int(time_left.total_seconds() % 60)} сек"
-            
-   @dp.callback_query(Form.crypto_currency)
-async def process_crypto_currency(callback: types.CallbackQuery, state: FSMContext):
-    try:
-        await callback.answer()
-        
-        user_id = callback.from_user.id
-        user_data = await get_user(user_id)
-        lang = user_data['language'] or 'ru'
-        data = callback.data
-        
-        state_data = await state.get_data()
-        if 'last_message_id' in state_data:
-            await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
-        
-        if data == 'back_to_confirmation':
-            state_data = await state.get_data()
-            city = state_data.get('city')
-            product = state_data.get('product')
-            price = state_data.get('price')
-            district = state_data.get('district')
-            delivery_type = state_data.get('delivery_type')
-            
-            order_text = get_text(
-                lang, 
-                'order_summary',
-                product=product,
-                price=price,
-                district=district,
-                delivery_type=delivery_type
-            )
-            
-            builder = InlineKeyboardBuilder()
-            builder.row(InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"))
-            builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
-            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_delivery"))
-            
-            # Используем функцию для показа меню с изображением
-            await show_menu_with_image(
-                callback.message,
-                order_text,
-                builder.as_markup(),
-                get_bot_setting('confirmation_menu_image'),
-                state
-            )
-            await state.set_state(Form.confirmation)
-            return
-        
-        # Для LTC
-        if data == 'crypto_LTC':
-            state_data = await state.get_data()
-            city = state_data.get('city')
             product_name = state_data.get('product')
             price = state_data.get('price')
             district = state_data.get('district')
@@ -1843,7 +1648,7 @@ async def check_invoice_after_delay(order_id, user_id, lang):
             try:
                 await bot.send_message(
                     user_id,
-                    "⏰ Время оплата истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
+                    "⏰ Время оплаты истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
                 )
             except Exception as e:
                 logger.error(f"Error sending delay notification: {e}")

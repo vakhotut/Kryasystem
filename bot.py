@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, InputFile
 from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramBadRequest, TelegramNetworkError
 import aiohttp
 import traceback
@@ -99,7 +99,7 @@ CRYPTO_CURRENCIES = {
 def get_bot_setting(key):
     return BOT_SETTINGS.get(key, "")
 
-# Функция для генерации капчи в виде изображение
+# Функция для генерации капчи в виде изображения
 def generate_captcha_image(text):
     # Создаем изображение
     width, height = 200, 100
@@ -281,7 +281,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 logger.error(f"Error in invoice notification loop: {e}")
                 await asyncio.sleep(60)
     
-    # Запускаем задачу и сохраняем ссылку для отмена
+    # Запускаем задачу и сохраняем ссылку для отмены
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -612,8 +612,10 @@ async def process_language(callback: types.CallbackQuery, state: FSMContext):
         
         # Отправляем изображение капчи
         try:
+            # Создаем InputFile из BytesIO
+            input_file = InputFile(captcha_image, filename="captcha.png")
             await callback.message.answer_photo(
-                photo=captcha_image,
+                photo=input_file,
                 caption=get_text(lang_code, 'captcha_enter')
             )
         except Exception as e:
@@ -1509,6 +1511,8 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         if data == 'crypto_LTC':
             state_data = await state.get_data()
             city = state_data.get('city')
+                        state_data = await state.get_data()
+            city = state_data.get('city')
             product_name = state_data.get('product')
             price = state_data.get('price')
             district = state_data.get('district')
@@ -1567,7 +1571,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                 product_id
             )
             
-            # Сохраняем product_id в state для использования после оплата
+            # Сохраняем product_id в state для использования после оплаты
             await state.update_data(product_id=product_id)
             
             # Новый формат текста для покупки
@@ -1646,7 +1650,7 @@ async def check_invoice_after_delay(order_id, user_id, lang):
             try:
                 await bot.send_message(
                     user_id,
-                    "⏰ Время оплаты истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
+                    "⏰ Время оплата истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
                 )
             except Exception as e:
                 logger.error(f"Error sending delay notification: {e}")

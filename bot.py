@@ -6,7 +6,10 @@ import asyncio
 import os
 import socket
 import sys
+import contextlib
+import inspect
 from datetime import datetime, timedelta
+from functools import lru_cache
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -95,6 +98,11 @@ CRYPTO_CURRENCIES = {
     'LTC': 'Litecoin'
 }
 
+# Кеширование для часто используемых данных
+@lru_cache(maxsize=100)
+def get_cached_text(lang, key, **kwargs):
+    return get_text(lang, key, **kwargs)
+
 # Функция для получения настроек (в будущем можно заменить на загрузку из БД)
 def get_bot_setting(key):
     return BOT_SETTINGS.get(key, "")
@@ -139,6 +147,40 @@ def singleton_check():
         logger.error("Another instance of the bot is already running!")
         return False
 
+# Контекстный менеджер для работы с БД
+@contextlib.asynccontextmanager
+async def db_connection():
+    conn = await db_pool.acquire()
+    try:
+        yield conn
+    finally:
+        await db_pool.release(conn)
+
+# Безопасная отправка сообщений
+async def safe_send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    try:
+        return await bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        return None
+
+# Получение языка пользователя
+async def get_user_language(user_id):
+    user_data = await get_user(user_id)
+    return user_data['language'] or 'ru'
+
+# Проверка бана пользователя
+async def check_ban(user_id):
+    if await is_banned(user_id):
+        lang = await get_user_language(user_id)
+        await safe_send_message(user_id, get_cached_text(lang, 'ban_message'))
+        return True
+    return False
+
+# Проверка активных инвойсов
+async def check_active_invoice(user_id: int) -> bool:
+    return await has_active_invoice(user_id)
+
 # Вспомогательная функция для удаления предыдущего сообщения
 async def delete_previous_message(chat_id: int, message_id: int):
     try:
@@ -164,6 +206,10 @@ async def safe_delete_previous_message(chat_id: int, message_id: int, state: FSM
 async def show_menu_with_image(message, caption, keyboard, image_url, state):
     try:
         user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
+        
+        if await check_ban(user_id):
+            return None
+            
         data = await state.get_data()
         
         if 'last_message_id' in data:
@@ -198,7 +244,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
     async def notify():
         while True:
             try:
-                async with db_pool.acquire() as conn:
+                async with db_connection() as conn:
                     invoice = await conn.fetchrow(
                         "SELECT * FROM transactions WHERE order_id = $1 AND status = 'pending'",
                         order_id
@@ -211,12 +257,14 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                     minutes_left = int(time_left.total_seconds() // 60)
                     
                     # Отправляем уведомление каждые 5 минут
-                    if minutes_left % 5 == 0 and minutes_left > 0:
+                    if minutes_left > 0 and minutes_left % 5 == 0:
                         try:
-                            await bot.send_message(
-                                user_id,
-                                get_text(lang, 'invoice_time_left', time_left=f"{minutes_left} минут")
-                            )
+                            if "Пополнение баланса" in invoice['product_info']:
+                                notification_text = get_cached_text(lang, 'balance_invoice_time_left', time_left=f"{minutes_left} минут")
+                            else:
+                                notification_text = get_cached_text(lang, 'invoice_time_left', time_left=f"{minutes_left} минут")
+                                
+                            await safe_send_message(user_id, notification_text)
                         except Exception as e:
                             logger.error(f"Error sending notification: {e}")
                     
@@ -225,7 +273,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 
                 # После истечения времени
                 if invoice and invoice['expires_at'] <= datetime.now():
-                    async with db_pool.acquire() as conn:
+                    async with db_connection() as conn:
                         await conn.execute(
                             "UPDATE transactions SET status = 'expired' WHERE order_id = $1",
                             order_id
@@ -258,20 +306,20 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                         user_data = await get_user(user_id)
                         lang = user_data['language'] or 'ru'
                         
-                        await bot.send_message(
+                        await safe_send_message(
                             user_id,
-                            get_text(lang, 'invoice_expired', failed_count=new_failed)
+                            get_cached_text(lang, 'invoice_expired', failed_count=new_failed)
                         )
                         
                         if new_failed == 2:
-                            await bot.send_message(
+                            await safe_send_message(
                                 user_id,
-                                get_text(lang, 'almost_banned', remaining=1)
+                                get_cached_text(lang, 'almost_banned', remaining=1)
                             )
                         elif new_failed >= 3:
-                            await bot.send_message(
+                            await safe_send_message(
                                 user_id,
-                                get_text(lang, 'ban_message')
+                                get_cached_text(lang, 'ban_message')
                             )
                     except Exception as e:
                         logger.error(f"Error sending expiration message: {e}")
@@ -289,10 +337,14 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
 async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
     try:
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         
-        balance_text = get_text(lang, 'balance_instructions', balance=user_data['balance'] or 0)
+        balance_text = get_cached_text(lang, 'balance_instructions', balance=user_data['balance'] or 0)
         
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="topup_balance"))
@@ -314,10 +366,14 @@ async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
 async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMContext):
     try:
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         
-        topup_info = get_text(lang, 'balance_topup_info')
+        topup_info = get_cached_text(lang, 'balance_topup_info')
         
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="LTC", callback_data="topup_ltc"))
@@ -338,7 +394,7 @@ async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMCont
 # Функция для показа активного инвойса
 async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, user_id: int, lang: str):
     try:
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             invoice = await conn.fetchrow(
                 "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW()",
                 user_id
@@ -355,7 +411,7 @@ async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, 
             else:
                 text_key = 'purchase_invoice'
             
-            payment_text = get_text(
+            payment_text = get_cached_text(
                 lang, 
                 text_key,
                 product=invoice['product_info'],
@@ -459,6 +515,10 @@ async def check_pending_transactions_loop():
 async def process_successful_payment(transaction):
     try:
         user_id = transaction['user_id']
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         
@@ -519,14 +579,14 @@ async def process_successful_payment(transaction):
         
         # Если это пополнение баланса, обновляем баланс
         else:
-            async with db_pool.acquire() as conn:
+            async with db_connection() as conn:
                 await conn.execute(
                     "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
                     transaction['amount'], user_id
                 )
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=get_text(lang, 'balance_add_success', 
+                await safe_send_message(
+                    user_id,
+                    get_cached_text(lang, 'balance_add_success', 
                             amount=transaction['amount'], 
                             balance=user_data['balance'] + transaction['amount'])
                 )
@@ -554,20 +614,19 @@ async def cmd_start(message: types.Message, state: FSMContext):
         user = message.from_user
         user_id = user.id
         
+        if await check_ban(user_id):
+            return
+        
         # Проверяем есть ли реферальный код в параметрах
         referrer_code = None
         if len(message.text.split()) > 1:
             referrer_code = message.text.split()[1]
         
-        if await is_banned(user_id):
-            await message.answer("Вы забанены. Обратитесь к поддержке.")
-            return
-        
         existing_user = await get_user(user_id)
         if existing_user:
             if existing_user['captcha_passed']:
                 lang = existing_user['language'] or 'ru'
-                await message.answer(get_text(lang, 'welcome'))
+                await message.answer(get_cached_text(lang, 'welcome'))
                 await show_main_menu(message, state, user_id, lang)
                 await state.set_state(Form.main_menu)
                 return
@@ -595,13 +654,17 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def process_language(callback: types.CallbackQuery, state: FSMContext):
     try:
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         lang_code = callback.data.replace('lang_', '')
         
         await update_user(user_id, language=lang_code)
         
         await callback.answer()
         # Отправляем новое сообщение вместо редактирования
-        await callback.message.answer(text=get_text(lang_code, 'language_selected'))
+        await callback.message.answer(text=get_cached_text(lang_code, 'language_selected'))
         
         # Генерируем капчу
         captcha_code = ''.join(random.choices('0123456789', k=5))
@@ -616,13 +679,13 @@ async def process_language(callback: types.CallbackQuery, state: FSMContext):
             input_file = InputFile(captcha_image, filename="captcha.png")
             await callback.message.answer_photo(
                 photo=input_file,
-                caption=get_text(lang_code, 'captcha_enter')
+                caption=get_cached_text(lang_code, 'captcha_enter')
             )
         except Exception as e:
             logger.error(f"Error sending captcha image: {e}")
             # Fallback: отправляем капчу текстом
             await callback.message.answer(
-                text=f"{get_text(lang_code, 'captcha_enter')}\n\nКод: {captcha_code}"
+                text=f"{get_cached_text(lang_code, 'captcha_enter')}\n\nКод: {captcha_code}"
             )
         
         await state.set_state(Form.captcha)
@@ -636,10 +699,14 @@ async def process_captcha(message: types.Message, state: FSMContext):
     try:
         user_input = message.text
         user = message.from_user
+        
+        if await check_ban(user.id):
+            return
+            
         data = await state.get_data()
         
         if user_input == data.get('captcha'):
-            async with db_pool.acquire() as conn:
+            async with db_connection() as conn:
                 await conn.execute(
                     'INSERT INTO users (user_id, username, first_name, captcha_passed) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO UPDATE SET captcha_passed = $5',
                     user.id, user.username, user.first_name, 1, 1
@@ -647,13 +714,13 @@ async def process_captcha(message: types.Message, state: FSMContext):
             
             user_data = await get_user(user.id)
             lang = user_data['language'] or 'ru'
-            await message.answer(get_text(lang, 'captcha_success'))
+            await message.answer(get_cached_text(lang, 'captcha_success'))
             await show_main_menu(message, state, user.id, lang)
             await state.set_state(Form.main_menu)
         else:
             user_data = await get_user(user.id)
             lang = user_data['language'] or 'ru'
-            await message.answer(get_text(lang, 'captcha_failed'))
+            await message.answer(get_cached_text(lang, 'captcha_failed'))
     except Exception as e:
         logger.error(f"Error processing captcha: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
@@ -664,6 +731,9 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         if not user:
             return
         
+        if await check_ban(user_id):
+            return
+            
         # Генерируем реферальный код если его нет
         if not user.get('referral_code'):
             referral_code = await generate_referral_code(user_id)
@@ -675,9 +745,9 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         referral_link = f"https://t.me/{bot_username}?start={referral_code}"
         
         # Используем новый текст описания магазина
-        shop_description = get_text(lang, 'main_menu_description') + "\n\n"
+        shop_description = get_cached_text(lang, 'main_menu_description') + "\n\n"
         
-        user_info_text = get_text(
+        user_info_text = get_cached_text(
             lang, 
             'main_menu', 
             name=user['first_name'] or 'N/A',
@@ -695,11 +765,11 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         full_text = shop_description + user_info_text + referral_info
         
         builder = InlineKeyboardBuilder()
-        cities = get_cities_cache()  # Исправлено: используем функцию вместо прямой переменной
+        cities = get_cities_cache()
         for city in cities:
             builder.row(InlineKeyboardButton(text=city['name'], callback_data=f"city_{city['name']}"))
         builder.row(
-            InlineKeyboardButton(text=f"💰 {get_text(lang, 'balance', balance=user['balance'] or 0)}", callback_data="balance"),
+            InlineKeyboardButton(text=f"💰 {get_cached_text(lang, 'balance', balance=user['balance'] or 0)}", callback_data="balance"),
             InlineKeyboardButton(text="📦 История заказов", callback_data="order_history")
         )
         
@@ -735,18 +805,16 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         data = callback.data
         
         # Проверяем есть ли активный инвойс
-        async with db_pool.acquire() as conn:
-            active_invoice = await conn.fetchrow(
-                "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW()",
-                user_id
-            )
-        
-        if active_invoice and data.startswith('city_'):
+        if await check_active_invoice(user_id) and data.startswith('city_'):
             # Показываем экран с инвойсом вместо перехода к выбору города
             await show_active_invoice(callback, state, user_id, lang)
             return
@@ -779,7 +847,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
-                get_text(lang, 'select_category'),
+                get_cached_text(lang, 'select_category'),
                 builder.as_markup(),
                 get_bot_setting('category_menu_image'),
                 state
@@ -792,7 +860,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             await show_order_history(callback, state)
         elif data == 'bonuses':
             sent_message = await callback.message.answer(
-                text=get_text(lang, 'bonuses')
+                text=get_cached_text(lang, 'bonuses')
             )
             await state.update_data(last_message_id=sent_message.message_id)
         elif data == 'rules':
@@ -834,6 +902,10 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
 async def show_order_history(callback: types.CallbackQuery, state: FSMContext):
     try:
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         
@@ -841,7 +913,7 @@ async def show_order_history(callback: types.CallbackQuery, state: FSMContext):
         orders = await get_user_orders(user_id, 15)  # Ограничим 15 последними заказами
         
         if not orders:
-            await callback.answer(get_text(lang, 'no_orders'))
+            await callback.answer(get_cached_text(lang, 'no_orders'))
             return
             
         builder = InlineKeyboardBuilder()
@@ -891,8 +963,13 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
     try:
         order_id = int(callback.data.replace("view_order_", ""))
         
+        user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         # Получаем полную информацию о заказе с данными о продукте
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             order = await conn.fetchrow('''
                 SELECT p.*, pr.description as product_description, 
                        pr.image_url as product_image, c.name as city_name
@@ -971,6 +1048,10 @@ async def process_balance_menu(callback: types.CallbackQuery, state: FSMContext)
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         data = callback.data
@@ -991,6 +1072,10 @@ async def process_topup_currency(callback: types.CallbackQuery, state: FSMContex
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         data = callback.data
@@ -1001,7 +1086,7 @@ async def process_topup_currency(callback: types.CallbackQuery, state: FSMContex
         elif data == 'topup_ltc':
             await state.update_data(topup_currency='LTC')
             
-            await callback.message.answer(get_text(lang, 'balance_add'))
+            await callback.message.answer(get_cached_text(lang, 'balance_add'))
             await state.set_state(Form.balance)
     except Exception as e:
         logger.error(f"Error processing topup currency: {e}")
@@ -1013,6 +1098,10 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         data = callback.data
@@ -1035,7 +1124,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
         
         if city not in products_cache:
             sent_message = await callback.message.answer(
-                text=get_text(lang, 'error')
+                text=get_cached_text(lang, 'error')
             )
             await state.update_data(last_message_id=sent_message.message_id)
             return
@@ -1048,7 +1137,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
         
         if not category_products:
             sent_message = await callback.message.answer(
-                text=get_text(lang, 'error')
+                text=get_cached_text(lang, 'error')
             )
             await state.update_data(last_message_id=sent_message.message_id)
             return
@@ -1080,6 +1169,10 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         data = callback.data
@@ -1103,7 +1196,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
-                get_text(lang, 'select_category'),
+                get_cached_text(lang, 'select_category'),
                 builder.as_markup(),
                 get_bot_setting('category_menu_image'),
                 state
@@ -1122,7 +1215,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             
             if city not in products_cache or product_name not in products_cache[city]:
                 sent_message = await callback.message.answer(
-                text=get_text(lang, 'error')
+                text=get_cached_text(lang, 'error')
                 )
                 await state.update_data(last_message_id=sent_message.message_id)
                 return
@@ -1152,7 +1245,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
-                get_text(lang, 'select_district'),
+                get_cached_text(lang, 'select_district'),
                 builder.as_markup(),
                 get_bot_setting('district_menu_image'),
                 state
@@ -1183,7 +1276,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
-                get_text(lang, 'select_delivery'),
+                get_cached_text(lang, 'select_delivery'),
                 builder.as_markup(),
                 get_bot_setting('delivery_menu_image'),
                 state
@@ -1199,6 +1292,10 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         data = callback.data
@@ -1225,7 +1322,7 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
-                get_text(lang, 'select_district'),
+                get_cached_text(lang, 'select_district'),
                 builder.as_markup(),
                 get_bot_setting('district_menu_image'),
                 state
@@ -1235,8 +1332,8 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         
         delivery_type = data.replace('del_', '')
         
-        # Проверяем доступность типа доставки
-        if not await is_delivery_type_available(del_type):
+        # ИСПРАВЛЕННАЯ СТРОКА: используем delivery_type вместо del_type
+        if not await is_delivery_type_available(delivery_type):
             sent_message = await callback.message.answer(
                 text="Этот тип доставки временно недоступен"
             )
@@ -1251,7 +1348,7 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         price = state_data.get('price')
         district = state_data.get('district')
         
-        order_text = get_text(
+        order_text = get_cached_text(
             lang, 
             'order_summary',
             product=product,
@@ -1284,6 +1381,10 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         data = callback.data
@@ -1307,7 +1408,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
-                get_text(lang, 'select_delivery'),
+                get_cached_text(lang, 'select_delivery'),
                 builder.as_markup(),
                 get_bot_setting('delivery_menu_image'),
                 state
@@ -1345,7 +1446,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
-                get_text(lang, 'select_crypto'),
+                get_cached_text(lang, 'select_crypto'),
                 builder.as_markup(),
                 get_bot_setting('confirmation_menu_image'),
             state
@@ -1365,6 +1466,10 @@ async def pay_with_balance(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         
@@ -1382,7 +1487,7 @@ async def pay_with_balance(callback: types.CallbackQuery, state: FSMContext):
             return
         
         # Получаем информацию о товаре
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             product_row = await conn.fetchrow(
                 "SELECT * FROM products WHERE name = $1 AND city_id = (SELECT id FROM cities WHERE name = $2) LIMIT 1",
                 product_name, city
@@ -1394,19 +1499,19 @@ async def pay_with_balance(callback: types.CallbackQuery, state: FSMContext):
             
             # Проверяем доступное количество
             if product_row['quantity'] <= 0:
-                await callback.message.answer(get_text(lang, 'product_out_of_stock'))
+                await callback.message.answer(get_cached_text(lang, 'product_out_of_stock'))
                 return
 
             # Бронируем товар
             if not await reserve_product(product_row['id']):
-                await callback.message.answer(get_text(lang, 'product_out_of_stock'))
+                await callback.message.answer(get_cached_text(lang, 'product_out_of_stock'))
                 return
 
             product_id = product_row['id']
         
         try:
             # Списание средств
-            async with db_pool.acquire() as conn:
+            async with db_connection() as conn:
                 await conn.execute(
                     "UPDATE users SET balance = balance - $1 WHERE user_id = $2",
                     price, user_id
@@ -1466,6 +1571,10 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         await callback.answer()
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         data = callback.data
@@ -1482,7 +1591,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             district = state_data.get('district')
             delivery_type = state_data.get('delivery_type')
             
-            order_text = get_text(
+            order_text = get_cached_text(
                 lang, 
                 'order_summary',
                 product=product,
@@ -1523,7 +1632,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             amount_ltc = price / ltc_rate
             
             # Получаем product_id для добавления в sold_products после оплаты
-            async with db_pool.acquire() as conn:
+            async with db_connection() as conn:
                 product_row = await conn.fetchrow(
                     "SELECT * FROM products WHERE name = $1 AND city_id = (SELECT id FROM cities WHERE name = $2) LIMIT 1",
                     product_name, city
@@ -1535,12 +1644,12 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                 
                 # Проверяем доступное количество
                 if product_row['quantity'] <= 0:
-                    await callback.message.answer(get_text(lang, 'product_out_of_stock'))
+                    await callback.message.answer(get_cached_text(lang, 'product_out_of_stock'))
                     return
 
                 # Бронируем товар
                 if not await reserve_product(product_row['id']):
-                    await callback.message.answer(get_text(lang, 'product_out_of_stock'))
+                    await callback.message.answer(get_cached_text(lang, 'product_out_of_stock'))
                     return
 
                 product_id = product_row['id']
@@ -1549,7 +1658,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                 address_data = ltc_wallet.generate_address()
             except Exception as e:
                 logger.error(f"Error generating LTC address: {e}")
-                await callback.message.answer(get_text(lang, 'error'))
+                await callback.message.answer(get_cached_text(lang, 'error'))
                 return
             
             qr_code = ltc_wallet.get_qr_code(address_data['address'], amount_ltc)
@@ -1577,7 +1686,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             time_left = expires_at - datetime.now()
             time_left_str = f"{int(time_left.total_seconds() // 60)} мин {int(time_left.total_seconds() % 60)} сек"
             
-            payment_text = get_text(
+            payment_text = get_cached_text(
                 lang,
                 'purchase_invoice',
                 product=product_name,
@@ -1627,7 +1736,7 @@ async def check_invoice_after_delay(order_id, user_id, lang):
     await asyncio.sleep(TRANSACTION_CHECK_DELAY)
     
     # Получаем информацию о транзакции
-    async with db_pool.acquire() as conn:
+    async with db_connection() as conn:
         invoice = await conn.fetchrow(
             "SELECT * FROM transactions WHERE order_id = $1",
             order_id
@@ -1657,6 +1766,10 @@ async def check_invoice_after_delay(order_id, user_id, lang):
 async def process_balance(message: types.Message, state: FSMContext):
     try:
         user = message.from_user
+        
+        if await check_ban(user.id):
+            return
+            
         user_data = await get_user(user.id)
         lang = user_data['language'] or 'ru'
         amount_text = message.text
@@ -1664,7 +1777,7 @@ async def process_balance(message: types.Message, state: FSMContext):
         try:
             amount = float(amount_text)
             if amount <= 0:
-                await message.answer(get_text(lang, 'error'))
+                await message.answer(get_cached_text(lang, 'error'))
                 return
             
             # Получаем текущий курс LTC с кеширования
@@ -1678,7 +1791,7 @@ async def process_balance(message: types.Message, state: FSMContext):
                 address_data = ltc_wallet.generate_address()
             except Exception as e:
                 logger.error(f"Error generating LTC address: {e}")
-                await message.answer(get_text(lang, 'error'))
+                await message.answer(get_cached_text(lang, 'error'))
                 return
             
             # Создаем QR-код
@@ -1705,7 +1818,7 @@ async def process_balance(message: types.Message, state: FSMContext):
             time_left = expires_at - datetime.now()
             time_left_str = f"{int(time_left.total_seconds() // 60)} мин {int(time_left.total_seconds() % 60)} сек"
             
-            payment_text = get_text(
+            payment_text = get_cached_text(
                 lang,
                 'active_invoice',
                 crypto_address=address_data['address'],
@@ -1744,7 +1857,7 @@ async def process_balance(message: types.Message, state: FSMContext):
             asyncio.create_task(check_invoice_after_delay(order_id, user.id, lang))
                 
         except ValueError:
-            await message.answer(get_text(lang, 'error'))
+            await message.answer(get_cached_text(lang, 'error'))
     except Exception as e:
         logger.error(f"Error processing balance: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
@@ -1756,10 +1869,14 @@ async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Проверка оплаты... Пожалуйста, подождите")
         
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             invoice = await conn.fetchrow(
                 "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending'",
                 user_id
@@ -1791,10 +1908,14 @@ async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
 async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
     try:
         user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             # Получаем информацию о транзакции для возврата товара
             invoice = await conn.fetchrow(
                 "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending'",
@@ -1853,6 +1974,10 @@ async def back_to_topup_menu(callback: types.CallbackQuery, state: FSMContext):
 async def handle_text(message: types.Message, state: FSMContext):
     try:
         user_id = message.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         text = message.text

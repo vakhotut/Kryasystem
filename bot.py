@@ -99,7 +99,7 @@ CRYPTO_CURRENCIES = {
 def get_bot_setting(key):
     return BOT_SETTINGS.get(key, "")
 
-# Функция для генерации капчи в виде изображения
+# Функция для генерации капчи в виде изображение
 def generate_captcha_image(text):
     # Создаем изображение
     width, height = 200, 100
@@ -281,7 +281,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                 logger.error(f"Error in invoice notification loop: {e}")
                 await asyncio.sleep(60)
     
-    # Запускаем задачу и сохраняем ссылку для отменя
+    # Запускаем задачу и сохраняем ссылку для отмены
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -879,11 +879,16 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
     try:
         order_id = int(callback.data.replace("view_order_", ""))
         
-        # Получаем информацию о заказе
+        # Получаем полную информацию о заказе с данными о продукте
         async with db_pool.acquire() as conn:
-            order = await conn.fetchrow(
-                "SELECT * FROM purchases WHERE id = $1", order_id
-            )
+            order = await conn.fetchrow('''
+                SELECT p.*, pr.description as product_description, 
+                       pr.image_url as product_image, c.name as city_name
+                FROM purchases p
+                LEFT JOIN products pr ON p.product_id::integer = pr.id
+                LEFT JOIN cities c ON pr.city_id = c.id
+                WHERE p.id = $1
+            ''', order_id)
         
         if not order:
             await callback.answer("Заказ не найден")
@@ -892,35 +897,34 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         # Форматируем дату и время
         order_time = order['purchase_time'].strftime("%d.%m.%Y %H:%M:%S")
         
-        # Формируем текст с информацией о заказе
+        # Формируем текст с полной информацией о заказе
         order_text = (
+            f"🆔 <b>ID заказа:</b> {order['id']}\n"
             f"📦 <b>Товар:</b> {order['product']}\n"
-            f"💵 <b>Стоимость:</b> {order['price']}$\n"
-            f"🏙 <b>Район:</b> {order['district']}\n"
+            f"💵 <b>Цена:</b> {order['price']}$\n"
+            f"🏙 <b>Город:</b> {order.get('city_name', 'Не указан')}\n"
+            f"📍 <b>Район:</b> {order['district']}\n"
             f"🚚 <b>Тип доставки:</b> {order['delivery_type']}\n"
+            f"📝 <b>Описание:</b> {order.get('product_description', 'Нет описания')}\n"
             f"🕐 <b>Время заказа:</b> {order_time}\n"
             f"📊 <b>Статус:</b> {order['status']}"
         )
-        
-        # Добавляем описание товара если есть
-        if order.get('description'):
-            order_text += f"\n\n📝 <b>Описание:</b>\n{order['description']}"
         
         # Создаем клавиатуру
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="⬅️ Назад к истории", callback_data="order_history"))
         builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
         
+        # Удаляем предыдущее сообщение
+        state_data = await state.get_data()
+        if 'last_message_id' in state_data:
+            await safe_delete_previous_message(callback.message.chat.id, state_data['last_message_id'], state)
+        
         # Если есть изображение товара, отправляем его
-        if order.get('image_url'):
+        if order.get('product_image'):
             try:
-                # Удаляем предыдущее сообщение
-                state_data = await state.get_data()
-                if 'last_message_id' in state_data:
-                    await safe_delete_previous_message(callback.message.chat.id, state_data['last_message_id'], state)
-                
                 sent_message = await callback.message.answer_photo(
-                    photo=order['image_url'],
+                    photo=order['product_image'],
                     caption=order_text,
                     reply_markup=builder.as_markup(),
                     parse_mode='HTML'
@@ -936,11 +940,6 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
                 )
                 await state.update_data(last_message_id=sent_message.message_id)
         else:
-            # Удаляем предыдущее сообщение
-            state_data = await state.get_data()
-            if 'last_message_id' in state_data:
-                await safe_delete_previous_message(callback.message.chat.id, state_data['last_message_id'], state)
-            
             sent_message = await callback.message.answer(
                 text=order_text,
                 reply_markup=builder.as_markup(),
@@ -952,7 +951,7 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         
     except Exception as e:
         logger.error(f"Error in view order handler: {e}")
-        await callback.answer("Произошла ошибка")
+        await callback.answer("Произошла ошибка при получении информации о заказе")
 
 @dp.callback_query(Form.balance_menu)
 async def process_balance_menu(callback: types.CallbackQuery, state: FSMContext):
@@ -1656,7 +1655,7 @@ async def process_balance(message: types.Message, state: FSMContext):
                 await message.answer(get_text(lang, 'error'))
                 return
             
-            # Получаем текущий курс LTC с кешированием
+            # Получаем текущий курс LTC с кеширования
             ltc_rate = await get_ltc_usd_rate_cached()
             
             # Конвертируем USD в LTC

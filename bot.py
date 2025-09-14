@@ -347,7 +347,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
             if user_id in invoice_notifications:
                 del invoice_notifications[user_id]
     
-    # Запускаем задачу и сохраняем ссылку для отмены
+    # Запускаем задачу и сохраняем ссылку для отмена
     task = asyncio.create_task(notify())
     invoice_notifications[user_id] = task
 
@@ -623,6 +623,30 @@ async def reset_api_limits_loop():
             logger.exception("Error resetting API limits")
             await asyncio.sleep(3600)  # Повторяем через час при ошибке
 
+# Функция для проверки активных инвойсов по типу
+async def check_active_invoice_for_user(user_id, invoice_type="any"):
+    """
+    Проверяет наличие активных инвойсов для пользователя
+    invoice_type: "any" - любой, "topup" - пополнение, "purchase" - покупка
+    """
+    async with db_connection() as conn:
+        if invoice_type == "topup":
+            invoice = await conn.fetchrow(
+                "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW() AND product_info LIKE '%Пополнение баланса%'",
+                user_id
+            )
+        elif invoice_type == "purchase":
+            invoice = await conn.fetchrow(
+                "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW() AND product_info NOT LIKE '%Пополнение баланса%'",
+                user_id
+            )
+        else:
+            invoice = await conn.fetchrow(
+                "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW()",
+                user_id
+            )
+    return invoice is not None
+
 # Обработчики команд и состояний
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -846,73 +870,77 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             # Проверяем есть ли товары в этом городе
             products_cache = get_products_cache()
             if city not in products_cache or not any(product_info.get('quantity', 0) > 0 for product_info in products_cache[city].values()):
-                await callback.message.answer(
-                    "🛒 Этот город пока пустой. Ожидайте пополнения. Следите за нашим каналом в ожидании пополнения."
-                )
-                return
-            
-            await state.update_data(city=city)
-            
-            # Получаем актуальные кэши
-            categories_cache = get_categories_cache()
-            
-            builder = InlineKeyboardBuilder()
-            for category in categories_cache:
-                builder.row(InlineKeyboardButton(text=category['name'], callback_data=f"cat_{category['name']}"))
-            builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
-            
-            # Используем функцию для показа меню с изображением
-            await show_menu_with_image(
-                callback.message,
-                get_cached_text(lang, 'select_category'),
-                builder.as_markup(),
-                get_bot_setting('category_menu_image'),
-                state
+                            await callback.message.answer(
+                "🛒 Этот город пока пустой. Ожидайте пополнения. Следите за нашим каналом в ожидании пополнения."
             )
-            await state.set_state(Form.category)
-        elif data == 'balance':
-            await show_balance_menu(callback, state)
-            await state.set_state(Form.balance_menu)
-        elif data == 'order_history':
-            await show_order_history(callback, state)
-        elif data == 'bonuses':
-            sent_message = await callback.message.answer(
-                text=get_cached_text(lang, 'bonuses')
-            )
-            await state.update_data(last_message_id=sent_message.message_id)
-        elif data == 'rules':
-            # Открываем ссылку на правила
-            await callback.message.answer("Переходим к правилам...")
-        elif data == 'operator' or data == 'support':
-            # Открываем ссылку на оператора/поддержку
-            await callback.message.answer("Связываемся с оператором...")
-        elif data == 'channel':
-            # Открываем ссылку на канал
-            await callback.message.answer("Переходим в канал...")
-        elif data == 'reviews':
-            # Открываем ссылку на отзывы
-            await callback.message.answer("Переходим к отзываы...")
-        elif data == 'website':
-            # Открываем ссылку на сайт
-            await callback.message.answer("Переходим на сайт...")
-        elif data == 'change_language':
-            # Показываем выбор языка
-            builder = InlineKeyboardBuilder()
-            builder.add(
-                InlineKeyboardButton(text="Русский", callback_data='lang_ru'),
-                InlineKeyboardButton(text="English", callback_data='lang_en'),
-                InlineKeyboardButton(text="ქართული", callback_data='lang_ka')
-            )
-            builder.adjust(1)
-            
-            await callback.message.answer('Выберите язык / Select language / აირჩიეთ ენა:', reply_markup=builder.as_markup())
-            await state.set_state(Form.language)
-        elif data == 'main_menu':
-            await show_main_menu(callback.message, state, user_id, lang)
-            await state.set_state(Form.main_menu)
-    except Exception as e:
-        logger.exception("Error processing main menu")
-        await callback.answer("Произошла ошибка. Попробуйте позже.")
+            return
+        
+        await state.update_data(city=city)
+        
+        # Получаем актуальные кэши
+        categories_cache = get_categories_cache()
+        
+        builder = InlineKeyboardBuilder()
+        for category in categories_cache:
+            builder.row(InlineKeyboardButton(text=category['name'], callback_data=f"cat_{category['name']}"))
+        builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
+        
+        # Используем функцию для показа меню с изображением
+        await show_menu_with_image(
+            callback.message,
+            get_cached_text(lang, 'select_category'),
+            builder.as_markup(),
+            get_bot_setting('category_menu_image'),
+            state
+        )
+        await state.set_state(Form.category)
+    elif data == 'balance':
+        # Проверяем есть ли активный инвойс на пополнение
+        if await check_active_invoice_for_user(user_id, "topup"):
+            await show_active_invoice(callback, state, user_id, lang)
+            return
+        await show_balance_menu(callback, state)
+        await state.set_state(Form.balance_menu)
+    elif data == 'order_history':
+        await show_order_history(callback, state)
+    elif data == 'bonuses':
+        sent_message = await callback.message.answer(
+            text=get_cached_text(lang, 'bonuses')
+        )
+        await state.update_data(last_message_id=sent_message.message_id)
+    elif data == 'rules':
+        # Открываем ссылку на правила
+        await callback.message.answer("Переходим к правилам...")
+    elif data == 'operator' or data == 'support':
+        # Открываем ссылку на оператора/поддержку
+        await callback.message.answer("Связываемся с оператором...")
+    elif data == 'channel':
+        # Открываем ссылку на канал
+        await callback.message.answer("Переходим в канал...")
+    elif data == 'reviews':
+        # Открываем ссылку на отзывы
+        await callback.message.answer("Переходим к отзывам...")
+    elif data == 'website':
+        # Открываем ссылку на сайт
+        await callback.message.answer("Переходим на сайт...")
+    elif data == 'change_language':
+        # Показываем выбор языка
+        builder = InlineKeyboardBuilder()
+        builder.add(
+            InlineKeyboardButton(text="Русский", callback_data='lang_ru'),
+            InlineKeyboardButton(text="English", callback_data='lang_en'),
+            InlineKeyboardButton(text="ქართული", callback_data='lang_ka')
+        )
+        builder.adjust(1)
+        
+        await callback.message.answer('Выберите язык / Select language / აირჩიეთ ენა:', reply_markup=builder.as_markup())
+        await state.set_state(Form.language)
+    elif data == 'main_menu':
+        await show_main_menu(callback.message, state, user_id, lang)
+        await state.set_state(Form.main_menu)
+except Exception as e:
+    logger.exception("Error processing main menu")
+    await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Новая функция для отображения истории заказов
 @dp.callback_query(F.data == "order_history")
@@ -993,11 +1021,11 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
                 FROM purchases p
                 LEFT JOIN products pr ON p.product_id::integer = pr.id
                 LEFT JOIN cities c ON pr.city_id = c.id
-                WHERE p.id = $1
-            ''', order_id)
+                WHERE p.id = $1 AND p.user_id = $2
+            ''', order_id, user_id)
         
         if not order:
-            await callback.answer("Заказ не найден")
+            await callback.answer("Заказ не найден или у вас нет доступа к этому заказу")
             return
             
         # Форматируем дату и время
@@ -1055,6 +1083,8 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         
         await callback.answer()
         
+    except ValueError:
+        await callback.answer("Неверный формат ID заказа")
     except Exception as e:
         logger.exception("Error in view order handler")
         await callback.answer("Произошла ошибка при получении информации о заказе")
@@ -1073,7 +1103,11 @@ async def process_balance_menu(callback: types.CallbackQuery, state: FSMContext)
         lang = user_data['language'] or 'ru'
         data = callback.data
         
+        # ДОБАВЛЕНО: Проверка активного инвойса на пополнение
         if data == 'topup_balance':
+            if await check_active_invoice_for_user(user_id, "topup"):
+                await show_active_invoice(callback, state, user_id, lang)
+                return
             await show_topup_currency_menu(callback, state)
             await state.set_state(Form.topup_currency)
         elif data == 'main_menu':
@@ -1259,7 +1293,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
                 builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
             builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_category"))
             
-                       # Используем функцию для показа меню с изображением
+            # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
                 get_cached_text(lang, 'select_delivery'),
@@ -1470,7 +1504,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
                 get_cached_text(lang, 'select_crypto'),
                 builder.as_markup(),
                 get_bot_setting('confirmation_menu_image'),
-            state
+                state
             )
             await state.set_state(Form.crypto_currency)
         else:
@@ -1639,6 +1673,11 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         
         # Для LTC
         if data == 'crypto_LTC':
+            # ДОБАВЛЕНО: Проверка активного инвойса на покупку
+            if await check_active_invoice_for_user(user_id, "purchase"):
+                await show_active_invoice(callback, state, user_id, lang)
+                return
+            
             state_data = await state.get_data()
             city = state_data.get('city')
             product_name = state_data.get('product')
@@ -1778,7 +1817,7 @@ async def check_invoice_after_delay(order_id, user_id, lang):
             try:
                 await bot.send_message(
                     user_id,
-                    "⏰ Время оплата истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
+                    "⏰ Время оплаты истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
                 )
             except Exception as e:
                 logger.exception("Error sending delay notification")
@@ -1968,7 +2007,7 @@ async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
             logger.exception("Error deleting invoice message")
         
         # Отправляем новое текстовое сообщение
-        await callback.message.answer("❌ Инвойс отменен. Товар возвращен в продажу.")
+        await callback.message.answer("❌ Инвойс отменен. Т товар возвращен в продажу.")
         
         await show_main_menu(callback.message, state, user_id, lang)
         await state.set_state(Form.main_menu)

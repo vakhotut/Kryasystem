@@ -1006,7 +1006,7 @@ async def show_order_history(callback: types.CallbackQuery, state: FSMContext):
         logger.exception("Error showing order history")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
-# Обработчик для просмотра деталей заказа
+# Обработчик для просмотра деталей заказа (ИСПРАВЛЕННЫЙ)
 @dp.callback_query(F.data.startswith("view_order_"))
 async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
     try:
@@ -1017,13 +1017,31 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         if await check_ban(user_id):
             return
             
-        # Получаем полную информацию о заказе с данными о продукте
+        # Получаем информацию о заказе с исправленным SQL-запросом
         async with db_connection() as conn:
             order = await conn.fetchrow('''
-                SELECT p.*, pr.description as product_description, 
-                       pr.image_url as product_image, c.name as city_name
+                SELECT 
+                    p.*, 
+                    CASE 
+                        WHEN p.product_id IS NOT NULL AND p.product_id ~ '^[0-9]+$' 
+                        THEN pr.description 
+                        ELSE NULL 
+                    END as product_description,
+                    CASE 
+                        WHEN p.product_id IS NOT NULL AND p.product_id ~ '^[0-9]+$' 
+                        THEN pr.image_url 
+                        ELSE NULL 
+                    END as product_image,
+                    CASE 
+                        WHEN p.product_id IS NOT NULL AND p.product_id ~ '^[0-9]+$' 
+                        THEN c.name 
+                        ELSE NULL 
+                    END as city_name
                 FROM purchases p
-                LEFT JOIN products pr ON p.product_id::integer = pr.id
+                LEFT JOIN products pr ON 
+                    p.product_id IS NOT NULL AND 
+                    p.product_id ~ '^[0-9]+$' AND 
+                    CAST(p.product_id AS INTEGER) = pr.id
                 LEFT JOIN cities c ON pr.city_id = c.id
                 WHERE p.id = $1 AND p.user_id = $2
             ''', order_id, user_id)
@@ -1035,15 +1053,31 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         # Форматируем дату и время
         order_time = order['purchase_time'].strftime("%d.%m.%Y %H:%M:%S")
         
-        # Формируем текст с полной информацией о заказе
+        # Формируем текст с информацией о заказе
         order_text = (
             f"🆔 <b>ID заказа:</b> {order['id']}\n"
             f"📦 <b>Товар:</b> {order['product']}\n"
             f"💵 <b>Цена:</b> {order['price']}$\n"
-            f"🏙 <b>Город:</b> {order.get('city_name', 'Не указан')}\n"
+        )
+        
+        # Добавляем информацию о городе, если есть
+        if order.get('city_name'):
+            order_text += f"🏙 <b>Город:</b> {order['city_name']}\n"
+            
+        order_text += (
             f"📍 <b>Район:</b> {order['district']}\n"
             f"🚚 <b>Тип доставки:</b> {order['delivery_type']}\n"
-            f"📝 <b>Описание:</b> {order.get('product_description', 'Нет описания')}\n"
+        )
+        
+        # Добавляем описание товара, если есть
+        if order.get('product_description'):
+            # Обрезаем длинное описание
+            description = order['product_description']
+            if len(description) > 200:
+                description = description[:197] + "..."
+            order_text += f"📝 <b>Описание:</b> {description}\n"
+            
+        order_text += (
             f"🕐 <b>Время заказа:</b> {order_time}\n"
             f"📊 <b>Статус:</b> {order['status']}"
         )
@@ -1069,7 +1103,7 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
                 )
                 await state.update_data(last_message_id=sent_message.message_id)
             except Exception as e:
-                logger.exception("Error sending photo")
+                logger.exception("Error sending order photo, falling back to text")
                 # Fallback - отправляем только текст
                 sent_message = await callback.message.answer(
                     text=order_text,

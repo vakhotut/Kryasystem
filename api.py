@@ -9,8 +9,14 @@ from datetime import datetime, timedelta
 import json
 import hashlib
 import base58
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Глобальные настройки таймаутов
+ELECTRUM_CONNECT_TIMEOUT = 15.0
+ELECTRUM_REQUEST_TIMEOUT = 10.0
+API_REQUEST_TIMEOUT = 10.0
 
 # API ключи для ротации
 NOWNODES_API_KEYS = os.getenv('NOWNODES_API_KEYS', '').split(',')
@@ -19,12 +25,14 @@ BLOCKCHAIR_API_KEY = os.getenv('BLOCKCHAIR_API_KEY', '')
 COINGECKO_API_KEY = os.getenv('COINGECKO_API_KEY', '')
 TESTNET = os.getenv('TESTNET', 'False').lower() == 'true'
 
-# Electrum LTC серверы (mainnet и testnet)
+# Electrum LTC серверы (mainnet и testnet) - обновленный список
 ELECTRUM_SERVERS_MAINNET = [
     "electrum-ltc.bysh.me:50002",
     "electrum.ltc.xurious.com:50002",
     "ltc.rentonisk.com:50002",
-    "electrum.ltc.rentonisk.com:50002"
+    "electrum.ltc.rentonisk.com:50002",
+    "electrum-ltc.tamami.fr:50002",
+    "ltc.electrum.pw:50002"
 ]
 
 ELECTRUM_SERVERS_TESTNET = [
@@ -53,7 +61,7 @@ _key_rotation_lock = asyncio.Lock()
 from db import increment_api_request, get_api_limits
 
 class ElectrumClient:
-    """Клиент для работы с Electrum LTC сервером"""
+    """Клиент для работы с Electrum LTC сервером с улучшенной обработкой ошибок"""
     
     def __init__(self, testnet=False):
         self.testnet = testnet
@@ -64,64 +72,89 @@ class ElectrumClient:
         self.request_id = 0
         
     async def connect(self):
-        """Подключение к Electrum серверу"""
+        """Подключение к Electrum серверу с улучшенной обработкой ошибок"""
         global _electrum_server_index
         
-        if self.servers:
+        if not self.servers:
+            logger.error("No Electrum servers configured")
+            return False
+        
+        # Пробуем подключиться к разным серверам
+        for attempt in range(len(self.servers)):
             async with _key_rotation_lock:
                 server = self.servers[_electrum_server_index]
                 _electrum_server_index = (_electrum_server_index + 1) % len(self.servers)
             
             try:
                 host, port = server.split(':')
-                self.reader, self.writer = await asyncio.open_connection(host, int(port))
+                # Увеличиваем таймаут подключения
+                self.reader, self.writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, int(port)),
+                    timeout=ELECTRUM_CONNECT_TIMEOUT
+                )
                 self.current_server = server
                 
-                # Отправляем версионный запрос для подтверждения подключения
-                version_response = await self._request("server.version", ["electrum-ltc-client", "1.4"])
+                # Увеличиваем таймаут для версионного запроса
+                version_response = await asyncio.wait_for(
+                    self._request("server.version", ["electrum-ltc-client", "1.4"]),
+                    timeout=ELECTRUM_REQUEST_TIMEOUT
+                )
                 logger.debug(f"Connected to Electrum server {server}, version: {version_response}")
-                
                 return True
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout connecting to Electrum server {server}")
             except Exception as e:
-                logger.error(f"Failed to connect to Electrum server {server}: {e}")
-                return False
+                logger.warning(f"Failed to connect to Electrum server {server}: {e}")
+            
+            # Ждем перед следующей попыткой
+            await asyncio.sleep(1)
+        
+        logger.error("All Electrum servers failed to connect")
         return False
     
-    async def _request(self, method, params):
-        """Отправка запроса к Electrum серверу"""
-        if not self.reader or not self.writer:
-            if not await self.connect():
-                raise ConnectionError("Failed to connect to Electrum server")
-        
-        self.request_id += 1
-        request = {
-            "id": self.request_id,
-            "method": method,
-            "params": params
-        }
-        
-        try:
-            # Отправляем запрос
-            self.writer.write((json.dumps(request) + '\n').encode())
-            await self.writer.drain()
-            
-            # Читаем ответ
-            response_data = await self.reader.readline()
-            if not response_data:
-                raise ConnectionError("No data received from Electrum server")
-            
-            response = json.loads(response_data.decode().strip())
-            
-            if 'error' in response and response['error']:
-                raise Exception(f"Electrum error: {response['error']}")
-            
-            return response.get('result')
-        except Exception as e:
-            logger.error(f"Electrum request failed: {e}")
-            # Пробуем переподключиться к другому серверу
-            if await self.connect():
-                return await self._request(method, params)
-            raise
+    async def _request(self, method, params, retries=3):
+        """Отправка запроса к Electrum серверу с повторными попытками"""
+        for attempt in range(retries):
+            try:
+                if not self.reader or not self.writer:
+                    if not await self.connect():
+                        raise ConnectionError("Failed to connect to Electrum server")
+                
+                self.request_id += 1
+                request = {
+                    "id": self.request_id,
+                    "method": method,
+                    "params": params
+                }
+                
+                # Отправляем запрос
+                self.writer.write((json.dumps(request) + '\n').encode())
+                await self.writer.drain()
+                
+                # Читаем ответ
+                response_data = await asyncio.wait_for(
+                    self.reader.readline(),
+                    timeout=ELECTRUM_REQUEST_TIMEOUT
+                )
+                
+                if not response_data:
+                    raise ConnectionError("No data received from Electrum server")
+                
+                response = json.loads(response_data.decode().strip())
+                
+                if 'error' in response and response['error']:
+                    raise Exception(f"Electrum error: {response['error']}")
+                
+                return response.get('result')
+            except Exception as e:
+                logger.warning(f"Electrum request failed (attempt {attempt+1}/{retries}): {e}")
+                if attempt == retries - 1:
+                    # Пробуем переподключиться к другому серверу
+                    if await self.connect():
+                        continue
+                    raise
+                await asyncio.sleep(1)
     
     async def get_balance(self, address):
         """Получение баланса адреса"""
@@ -188,13 +221,15 @@ async def check_api_limit(api_name):
     try:
         api_limits = await get_api_limits()
         for limit in api_limits:
-            if limit['api_name'] == api_name:
+            if limit.get('api_name') == api_name:  # Используем get для безопасного доступа
                 if limit['requests_count'] < limit['daily_limit']:
                     await increment_api_request(api_name)
                     return True
                 else:
                     logger.warning(f"API limit exceeded for {api_name}")
                     return False
+        # Если лимит не найден, разрешаем запрос
+        logger.warning(f"No API limit found for {api_name}, allowing request")
         return True
     except Exception as e:
         logger.error(f"Error checking API limit for {api_name}: {e}")
@@ -249,7 +284,7 @@ async def get_binance_ltc_rate(symbol: str = 'LTCUSDT') -> Optional[float]:
     try:
         async with aiohttp.ClientSession() as session:
             url = f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}'
-            async with session.get(url, timeout=5) as response:
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     if 'price' in data:
@@ -274,7 +309,7 @@ async def get_coingecko_ltc_rate(currency: str = 'usd') -> Optional[float]:
             if COINGECKO_API_KEY:
                 headers['x-cg-pro-api-key'] = COINGECKO_API_KEY
                 
-            async with session.get(url, headers=headers, timeout=5) as response:
+            async with session.get(url, headers=headers, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     if 'litecoin' in data and currency in data['litecoin']:
@@ -295,7 +330,7 @@ async def get_coinbase_ltc_rate(currency: str = 'USD') -> Optional[float]:
     try:
         async with aiohttp.ClientSession() as session:
             url = f'https://api.coinbase.com/v2/prices/LTC-{currency}/spot'
-            async with session.get(url, timeout=5) as response:
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     if 'data' in data and 'amount' in data['data']:
@@ -314,7 +349,7 @@ async def get_kraken_ltc_rate(currency: str = 'USD') -> Optional[float]:
     try:
         async with aiohttp.ClientSession() as session:
             url = f'https://api.kraken.com/0/public/Ticker?pair=LTC{currency}'
-            async with session.get(url, timeout=5) as response:
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     if 'result' in data and f'LTC{currency}' in data['result']:
@@ -338,7 +373,7 @@ async def get_tsanghi_ltc_rate() -> Optional[float]:
     try:
         async with aiohttp.ClientSession() as session:
             url = 'https://tsanghi.com/api/fin/crypto/realtime?token=demo&ticker=LTC/USD&exchange_code=Binance'
-            async with session.get(url, timeout=5) as response:
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     if 'close' in data:
@@ -431,7 +466,7 @@ async def check_transaction_blockchair(address: str, amount: float, testnet: boo
             if BLOCKCHAIR_API_KEY:
                 url += f"?key={BLOCKCHAIR_API_KEY}"
                 
-            async with session.get(url, timeout=10) as response:
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     if data.get('data'):
@@ -454,7 +489,7 @@ async def check_transaction_sochain(address: str, amount: float, testnet: bool =
         async with aiohttp.ClientSession() as session:
             network = 'LTCTEST' if testnet else 'LTC'
             url = f"https://sochain.com/api/v2/get_address_balance/{network}/{address}"
-            async with session.get(url, timeout=10) as response:
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     if data['status'] == 'success':
@@ -492,7 +527,7 @@ async def check_transaction_nownodes(address: str, amount: float, testnet: bool 
             
             logger.debug(f"Using Nownodes key: {api_key[:5]}... for address: {address}")
             
-            async with session.get(url, headers=headers, timeout=10) as response:
+            async with session.get(url, headers=headers, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     return {
@@ -541,7 +576,7 @@ async def check_transaction_blockcypher(address: str, amount: float, testnet: bo
             
             logger.debug(f"Using BlockCypher key: {api_key[:5]}... for address: {address}")
             
-            async with session.get(url, params=params, timeout=10) as response:
+            async with session.get(url, params=params, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
                     data = await response.json()
                     return {
@@ -553,7 +588,7 @@ async def check_transaction_blockcypher(address: str, amount: float, testnet: bo
                 elif response.status == 429:
                     logger.warning(f"BlockCypher rate limit exceeded with key: {api_key[:5]}...")
                 else:
-                    logger.warning(f"BlockCypher API returned status {response.status} with key: {api_key[:5]}...")
+                    logger.warning(f"BlockCypher API returned status {response.status} с ключом: {api_key[:5]}...")
     except Exception as e:
         logger.error(f"BlockCypher API error: {e}")
     return None
@@ -708,3 +743,79 @@ def get_key_usage_stats() -> Dict[str, Any]:
         "cache_size": len(_address_cache),
         "rate_cache_size": len(_rate_cache)
     }
+
+# Функция для проверки здоровья Electrum серверов
+async def check_electrum_servers_health():
+    """Периодическая проверка здоровья Electrum серверов"""
+    while True:
+        try:
+            client = ElectrumClient()
+            if await client.connect():
+                logger.info("Electrum servers are healthy")
+                await client.close()
+            else:
+                logger.warning("Electrum servers are not responding")
+        except Exception as e:
+            logger.error(f"Electrum health check failed: {e}")
+        
+        await asyncio.sleep(300)  # Проверяем каждые 5 минут
+
+# Функция для немедленного перехода к другим провайдерам, если Electrum недоступен
+async def check_ltc_transaction_fallback(address: str, expected_amount: float, testnet: bool = TESTNET) -> bool:
+    """
+    Проверка LTC транзакции с немедленным переходом к другим провайдерам, если Electrum недоступен
+    """
+    try:
+        # Проверяем кеш перед обращением к API
+        cached_data, from_cache = await _get_cached_address_data(address, testnet)
+        if from_cache and cached_data and cached_data.get('received', 0) >= expected_amount:
+            logger.info(f"Transaction found in cache for address {address}")
+            return True
+        
+        # Сначала пробуем Electrum
+        try:
+            electrum_data = await asyncio.wait_for(
+                check_transaction_electrum(address, expected_amount, testnet),
+                timeout=30.0
+            )
+            if electrum_data and (electrum_data['received'] + electrum_data.get('unconfirmed_balance', 0)) >= expected_amount:
+                logger.info(f"Transaction found via Electrum: {electrum_data}")
+                await _set_cached_address_data(address, testnet, electrum_data)
+                return True
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning(f"Electrum check failed, using fallback providers immediately: {e}")
+        
+        # Если Electrum недоступен, сразу используем другие провайдеры
+        providers = [
+            ('blockchair', check_transaction_blockchair),
+            ('sochain', check_transaction_sochain),
+            ('nownodes', check_transaction_nownodes),
+            ('blockcypher', check_transaction_blockcypher)
+        ]
+        
+        for provider_name, provider_func in providers:
+            if testnet and provider_name == 'blockchair':
+                continue
+                
+            provider_data = await provider_func(address, expected_amount, testnet)
+            if provider_data:
+                received_amount = 0
+                if provider_name == 'sochain':
+                    received_amount = provider_data.get('balance', 0)
+                else:
+                    received_amount = provider_data.get('received', 0)
+                    
+                if provider_name == 'blockcypher':
+                    received_amount += provider_data.get('unconfirmed_balance', 0)
+                
+                if received_amount >= expected_amount:
+                    logger.info(f"Transaction found via {provider_name}: {provider_data}")
+                    await _set_cached_address_data(address, testnet, provider_data)
+                    return True
+        
+        logger.info("No transaction found with expected amount")
+        return False
+            
+    except Exception as e:
+        logger.error(f"Error checking LTC transaction: {e}")
+        return False

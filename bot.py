@@ -897,50 +897,108 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
     elif data == 'balance':
         # Проверяем есть ли активный инвойс на пополнение
         if await check_active_invoice_for_user(user_id, "topup"):
+            
+@dp.callback_query(Form.main_menu)
+async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        await callback.answer()
+        
+        user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
+        user_data = await get_user(user_id)
+        lang = user_data['language'] or 'ru'
+        data = callback.data
+        
+        # Проверяем есть ли активный инвойс
+        if await check_active_invoice(user_id) and data.startswith('city_'):
+            # Показываем экран с инвойсом вместо перехода к выбору города
             await show_active_invoice(callback, state, user_id, lang)
             return
-        await show_balance_menu(callback, state)
-        await state.set_state(Form.balance_menu)
-    elif data == 'order_history':
-        await show_order_history(callback, state)
-    elif data == 'bonuses':
-        sent_message = await callback.message.answer(
-            text=get_cached_text(lang, 'bonuses')
-        )
-        await state.update_data(last_message_id=sent_message.message_id)
-    elif data == 'rules':
-        # Открываем ссылку на правила
-        await callback.message.answer("Переходим к правилам...")
-    elif data == 'operator' or data == 'support':
-        # Открываем ссылку на оператора/поддержку
-        await callback.message.answer("Связываемся с оператором...")
-    elif data == 'channel':
-        # Открываем ссылку на канал
-        await callback.message.answer("Переходим в канал...")
-    elif data == 'reviews':
-        # Открываем ссылку на отзывы
-        await callback.message.answer("Переходим к отзывам...")
-    elif data == 'website':
-        # Открываем ссылку на сайт
-        await callback.message.answer("Переходим на сайт...")
-    elif data == 'change_language':
-        # Показываем выбор языка
-        builder = InlineKeyboardBuilder()
-        builder.add(
-            InlineKeyboardButton(text="Русский", callback_data='lang_ru'),
-            InlineKeyboardButton(text="English", callback_data='lang_en'),
-            InlineKeyboardButton(text="ქართული", callback_data='lang_ka')
-        )
-        builder.adjust(1)
         
-        await callback.message.answer('Выберите язык / Select language / აირჩიეთ ენა:', reply_markup=builder.as_markup())
-        await state.set_state(Form.language)
-    elif data == 'main_menu':
-        await show_main_menu(callback.message, state, user_id, lang)
-        await state.set_state(Form.main_menu)
-except Exception as e:
-    logger.exception("Error processing main menu")
-    await callback.answer("Произошла ошибка. Попробуйте позже.")
+        state_data = await state.get_data()
+        if 'last_message_id' in state_data:
+            await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
+        
+        if data.startswith('city_'):
+            city = data.replace('city_', '')
+            
+            # Проверяем есть ли товары в этом городе
+            products_cache = get_products_cache()
+            if city not in products_cache or not any(product_info.get('quantity', 0) > 0 for product_info in products_cache[city].values()):
+                await callback.message.answer(
+                    "🛒 Этот город пока пустой. Ожидайте пополнения. Следите за нашим каналом в ожидании пополнения."
+                )
+                return
+        
+            await state.update_data(city=city)
+            
+            # Получаем актуальные кэши
+            categories_cache = get_categories_cache()
+            
+            builder = InlineKeyboardBuilder()
+            for category in categories_cache:
+                builder.row(InlineKeyboardButton(text=category['name'], callback_data=f"cat_{category['name']}"))
+            builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
+            
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                get_cached_text(lang, 'select_category'),
+                builder.as_markup(),
+                get_bot_setting('category_menu_image'),
+                state
+            )
+            await state.set_state(Form.category)
+        elif data == 'balance':
+            # Проверяем есть ли активный инвойс на пополнение
+            if await check_active_invoice_for_user(user_id, "topup"):
+                await show_active_invoice(callback, state, user_id, lang)
+                return
+            await show_balance_menu(callback, state)
+            await state.set_state(Form.balance_menu)
+        elif data == 'order_history':
+            await show_order_history(callback, state)
+        elif data == 'bonuses':
+            sent_message = await callback.message.answer(
+                text=get_cached_text(lang, 'bonuses')
+            )
+            await state.update_data(last_message_id=sent_message.message_id)
+        elif data == 'rules':
+            # Открываем ссылку на правила
+            await callback.message.answer("Переходим к правилам...")
+        elif data == 'operator' or data == 'support':
+            # Открываем ссылку на оператора/поддержку
+            await callback.message.answer("Связываемся с оператором...")
+        elif data == 'channel':
+            # Открываем ссылку на канал
+            await callback.message.answer("Переходим в канал...")
+        elif data == 'reviews':
+            # Открываем ссылку на отзывы
+            await callback.message.answer("Переходим к отзывам...")
+        elif data == 'website':
+            # Открываем ссылку на сайт
+            await callback.message.answer("Переходим на сайт...")
+        elif data == 'change_language':
+            # Показываем выбор языка
+            builder = InlineKeyboardBuilder()
+            builder.add(
+                InlineKeyboardButton(text="Русский", callback_data='lang_ru'),
+                InlineKeyboardButton(text="English", callback_data='lang_en'),
+                InlineKeyboardButton(text="ქართული", callback_data='lang_ka')
+            )
+            builder.adjust(1)
+            
+            await callback.message.answer('Выберите язык / Select language / აირჩიეთ ენა:', reply_markup=builder.as_markup())
+            await state.set_state(Form.language)
+        elif data == 'main_menu':
+            await show_main_menu(callback.message, state, user_id, lang)
+            await state.set_state(Form.main_menu)
+    except Exception as e:
+        logger.exception("Error processing main menu")
+        await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Новая функция для отображения истории заказов
 @dp.callback_query(F.data == "order_history")

@@ -1965,21 +1965,25 @@ async def handle_text(message: types.Message, state: FSMContext):
         if await check_ban(user_id):
             return
             
+        current_state = await state.get_state()
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         text = message.text
         
-        if text.isdigit():
-            await state.update_data(balance_amount=float(text))
-            await process_balance(message, state)
+        # Если мы в состоянии баланса, обрабатываем сумму
+        if current_state == Form.balance.state:
+            if text.isdigit():
+                await state.update_data(balance_amount=float(text))
+                await process_balance(message, state)
+            else:
+                await message.answer(get_cached_text(lang, 'error'))
         else:
-            # Создаем новую задачу для показа меню вместо прямого вызова
-            asyncio.create_task(show_main_menu(message, state, user_id, lang))
+            # Для других состояний просто показываем главное меню
+            await show_main_menu(message, state, user_id, lang)
             await state.set_state(Form.main_menu)
     except Exception as e:
         logger.error(f"Error handling text: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
-
 async def main():
     # Проверка на единственный экземпляр
     if not singleton_check():

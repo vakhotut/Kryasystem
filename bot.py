@@ -1,3 +1,4 @@
+
 # bot.py
 import logging
 import random
@@ -114,10 +115,14 @@ def generate_captcha_image(text):
     image = Image.new('RGB', (width, height), color=(255, 255, 255))
     draw = ImageDraw.Draw(image)
     
-    # Используем стандартный шрифт или загружаем свой
+    # Используем стандартный шрифт (без зависимостей от системных шрифтов)
     try:
-        font = ImageFont.truetype("arial.ttf", 36)
+        # Попробуем использовать дефолтный шрифт
+        font = ImageFont.load_default()
+        # Или создадим шрифт на основе дефолтного с увеличенным размером
+        font = ImageFont.truetype("arial.ttf", 36) if os.path.exists("arial.ttf") else ImageFont.load_default().font_variant(size=36)
     except:
+        # Фолбэк на простой шрифт
         font = ImageFont.load_default()
     
     # Рисуем текст
@@ -840,64 +845,6 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
         logger.exception("Error showing main menu")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
-@dp.callback_query(Form.main_menu)
-async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
-    try:
-        await callback.answer()
-        
-        user_id = callback.from_user.id
-        
-        if await check_ban(user_id):
-            return
-            
-        user_data = await get_user(user_id)
-        lang = user_data['language'] or 'ru'
-        data = callback.data
-        
-        # Проверяем есть ли активный инвойс
-        if await check_active_invoice(user_id) and data.startswith('city_'):
-            # Показываем экран с инвойсом вместо перехода к выбору города
-            await show_active_invoice(callback, state, user_id, lang)
-            return
-        
-        state_data = await state.get_data()
-        if 'last_message_id' in state_data:
-            await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
-        
-        if data.startswith('city_'):
-            city = data.replace('city_', '')
-            
-            # Проверяем есть ли товары в этом городе
-            products_cache = get_products_cache()
-            if city not in products_cache or not any(product_info.get('quantity', 0) > 0 for product_info in products_cache[city].values()):
-                            await callback.message.answer(
-                "🛒 Этот город пока пустой. Ожидайте пополнения. Следите за нашим каналом в ожидании пополнения."
-            )
-            return
-        
-        await state.update_data(city=city)
-        
-        # Получаем актуальные кэши
-        categories_cache = get_categories_cache()
-        
-        builder = InlineKeyboardBuilder()
-        for category in categories_cache:
-            builder.row(InlineKeyboardButton(text=category['name'], callback_data=f"cat_{category['name']}"))
-        builder.row(InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"))
-        
-        # Используем функцию для показа меню с изображением
-        await show_menu_with_image(
-            callback.message,
-            get_cached_text(lang, 'select_category'),
-            builder.as_markup(),
-            get_bot_setting('category_menu_image'),
-            state
-        )
-        await state.set_state(Form.category)
-    elif data == 'balance':
-        # Проверяем есть ли активный инвойс на пополнение
-        if await check_active_invoice_for_user(user_id, "topup"):
-            
 @dp.callback_query(Form.main_menu)
 async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
     try:
@@ -2065,7 +2012,7 @@ async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
             logger.exception("Error deleting invoice message")
         
         # Отправляем новое текстовое сообщение
-        await callback.message.answer("❌ Инвойс отменен. Т товар возвращен в продажу.")
+        await callback.message.answer("❌ Инвойс отменен. Товар возвращен в продажу.")
         
         await show_main_menu(callback.message, state, user_id, lang)
         await state.set_state(Form.main_menu)

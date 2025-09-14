@@ -33,7 +33,7 @@ from db import (
     get_product_by_name_city, get_product_by_id, get_purchase_with_product,
     get_api_limits, increment_api_request, reset_api_limits,
     is_district_available, is_delivery_type_available,
-    add_user_referral, generate_referral_code
+    add_user_referral, generate_referral_code, db_connection, refresh_cache
 )
 from ltc_hdwallet import ltc_wallet
 from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats
@@ -147,15 +147,6 @@ def singleton_check():
         logger.error("Another instance of the bot is already running!")
         return False
 
-# Контекстный менеджер для работы с БД
-@contextlib.asynccontextmanager
-async def db_connection():
-    conn = await db_pool.acquire()
-    try:
-        yield conn
-    finally:
-        await db_pool.release(conn)
-
 # Безопасная отправка сообщений
 async def safe_send_message(chat_id, text, reply_markup=None, parse_mode=None):
     try:
@@ -202,7 +193,7 @@ async def safe_delete_previous_message(chat_id: int, message_id: int, state: FSM
     # Очищаем ID сообщения из состояния
     await state.update_data(last_message_id=None)
 
-# Функция для показа меню с изображением
+# Функция для показа меню с изображением [УЛУЧШЕНА ОБРАБОТКА ОШИБОК]
 async def show_menu_with_image(message, caption, keyboard, image_url, state):
     try:
         user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
@@ -215,11 +206,29 @@ async def show_menu_with_image(message, caption, keyboard, image_url, state):
         if 'last_message_id' in data:
             await safe_delete_previous_message(user_id, data['last_message_id'], state)
         
-        sent_message = await message.answer_photo(
-            photo=image_url,
-            caption=caption,
-            reply_markup=keyboard
-        )
+        try:
+            sent_message = await message.answer_photo(
+                photo=image_url,
+                caption=caption,
+                reply_markup=keyboard
+            )
+        except TelegramBadRequest as e:
+            if "wrong file identifier" in str(e).lower() or "failed to get HTTP URL content" in str(e).lower():
+                logger.warning(f"Invalid image URL: {image_url}, falling back to text")
+                # Fallback to text message
+                sent_message = await message.answer(
+                    text=caption,
+                    reply_markup=keyboard
+                )
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"Error sending photo: {e}")
+            # Fallback to text message
+            sent_message = await message.answer(
+                text=caption,
+                reply_markup=keyboard
+            )
         
         await state.update_data(last_message_id=sent_message.message_id)
         return sent_message
@@ -233,7 +242,7 @@ async def show_menu_with_image(message, caption, keyboard, image_url, state):
         await state.update_data(last_message_id=sent_message.message_id)
         return sent_message
 
-# Функция для уведомлений об инвойсе
+# Функция для уведомлений об инвойсе [ДОБАВЛЕНА ОБРАБОТКА ОТМЕНЫ]
 async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
     global invoice_notifications
     
@@ -242,92 +251,101 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
         del invoice_notifications[user_id]
     
     async def notify():
-        while True:
-            try:
-                async with db_connection() as conn:
-                    invoice = await conn.fetchrow(
-                        "SELECT * FROM transactions WHERE order_id = $1 AND status = 'pending'",
-                        order_id
-                    )
-                    
-                    if not invoice or invoice['expires_at'] <= datetime.now():
-                        break
-                    
-                    time_left = invoice['expires_at'] - datetime.now()
-                    minutes_left = int(time_left.total_seconds() // 60)
-                    
-                    # Отправляем уведомление каждые 5 минут
-                    if minutes_left > 0 and minutes_left % 5 == 0:
-                        try:
-                            if "Пополнение баланса" in invoice['product_info']:
-                                notification_text = get_cached_text(lang, 'balance_invoice_time_left', time_left=f"{minutes_left} минут")
-                            else:
-                                notification_text = get_cached_text(lang, 'invoice_time_left', time_left=f"{minutes_left} минут")
-                                
-                            await safe_send_message(user_id, notification_text)
-                        except Exception as e:
-                            logger.error(f"Error sending notification: {e}")
-                    
-                    # Проверяем каждую минуту
-                    await asyncio.sleep(60)
-                
-                # После истечения времени
-                if invoice and invoice['expires_at'] <= datetime.now():
+        try:
+            while True:
+                try:
                     async with db_connection() as conn:
-                        await conn.execute(
-                            "UPDATE transactions SET status = 'expired' WHERE order_id = $1",
+                        invoice = await conn.fetchrow(
+                            "SELECT * FROM transactions WHERE order_id = $1 AND status = 'pending'",
                             order_id
                         )
                         
-                        # Возвращаем товар, если это покупка
-                        if invoice and invoice.get('product_id') and "Пополнение баланса" not in invoice['product_info']:
-                            await release_product(invoice['product_id'])
-                            logger.info(f"Product {invoice['product_id']} released due to expiration")
+                        if not invoice or invoice['expires_at'] <= datetime.now():
+                            break
                         
-                        # Увеличиваем счетчик неудачных попыток только при истечении времени
-                        user = await conn.fetchrow(
-                            "SELECT * FROM users WHERE user_id = $1", user_id
-                        )
-                        new_failed = (user['failed_payments'] or 0) + 1
-                        await conn.execute(
-                            "UPDATE users SET failed_payments = $1 WHERE user_id = $2",
-                            new_failed, user_id
-                        )
+                        time_left = invoice['expires_at'] - datetime.now()
+                        minutes_left = int(time_left.total_seconds() // 60)
                         
-                        # Проверяем на бан
-                        if new_failed >= 3:
-                            ban_until = datetime.now() + timedelta(hours=24)
+                        # Отправляем уведомление каждые 5 минут
+                        if minutes_left > 0 and minutes_left % 5 == 0:
+                            try:
+                                if "Пополнение баланса" in invoice['product_info']:
+                                    notification_text = get_cached_text(lang, 'balance_invoice_time_left', time_left=f"{minutes_left} минут")
+                                else:
+                                    notification_text = get_cached_text(lang, 'invoice_time_left', time_left=f"{minutes_left} минут")
+                                    
+                                await safe_send_message(user_id, notification_text)
+                            except Exception as e:
+                                logger.error(f"Error sending notification: {e}")
+                        
+                        # Проверяем каждую минуту
+                        await asyncio.sleep(60)
+                    
+                    # После истечения времени
+                    if invoice and invoice['expires_at'] <= datetime.now():
+                        async with db_connection() as conn:
                             await conn.execute(
-                                "UPDATE users SET ban_until = $1 WHERE user_id = $2",
-                                ban_until, user_id
+                                "UPDATE transactions SET status = 'expired' WHERE order_id = $1",
+                                order_id
                             )
-                    
-                    try:
-                        user_data = await get_user(user_id)
-                        lang = user_data['language'] or 'ru'
+                            
+                            # Возвращаем товар, если это покупка
+                            if invoice and invoice.get('product_id') and "Пополнение баланса" not in invoice['product_info']:
+                                await release_product(invoice['product_id'])
+                                logger.info(f"Product {invoice['product_id']} released due to expiration")
+                            
+                            # Увеличиваем счетчик неудачных попыток только при истечении времени
+                            user = await conn.fetchrow(
+                                "SELECT * FROM users WHERE user_id = $1", user_id
+                            )
+                            new_failed = (user['failed_payments'] or 0) + 1
+                            await conn.execute(
+                                "UPDATE users SET failed_payments = $1 WHERE user_id = $2",
+                                new_failed, user_id
+                            )
+                            
+                            # Проверяем на бан
+                            if new_failed >= 3:
+                                ban_until = datetime.now() + timedelta(hours=24)
+                                await conn.execute(
+                                    "UPDATE users SET ban_until = $1 WHERE user_id = $2",
+                                    ban_until, user_id
+                                )
                         
-                        await safe_send_message(
-                            user_id,
-                            get_cached_text(lang, 'invoice_expired', failed_count=new_failed)
-                        )
-                        
-                        if new_failed == 2:
+                        try:
+                            user_data = await get_user(user_id)
+                            lang = user_data['language'] or 'ru'
+                            
                             await safe_send_message(
                                 user_id,
-                                get_cached_text(lang, 'almost_banned', remaining=1)
+                                get_cached_text(lang, 'invoice_expired', failed_count=new_failed)
                             )
-                        elif new_failed >= 3:
-                            await safe_send_message(
-                                user_id,
-                                get_cached_text(lang, 'ban_message')
-                            )
-                    except Exception as e:
-                        logger.error(f"Error sending expiration message: {e}")
-                    
-                    break
-            except Exception as e:
-                logger.error(f"Error in invoice notification loop: {e}")
-                await asyncio.sleep(60)
+                            
+                            if new_failed == 2:
+                                await safe_send_message(
+                                    user_id,
+                                    get_cached_text(lang, 'almost_banned', remaining=1)
+                                )
+                            elif new_failed >= 3:
+                                await safe_send_message(
+                                    user_id,
+                                    get_cached_text(lang, 'ban_message')
+                                )
+                        except Exception as e:
+                            logger.error(f"Error sending expiration message: {e}")
+                        
+                        break
+                except Exception as e:
+                    logger.error(f"Error in invoice notification loop: {e}")
+                    await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            logger.info(f"Invoice notification task for user {user_id} was cancelled")
+        except Exception as e:
+            logger.error(f"Error in invoice notification loop: {e}")
+        finally:
+            # Убедиться, что задача удалена из глобального словаря
+            if user_id in invoice_notifications:
+                del invoice_notifications[user_id]
     
     # Запускаем задачу и сохраняем ссылку для отмены
     task = asyncio.create_task(notify())
@@ -482,7 +500,7 @@ async def get_ltc_usd_rate_cached():
     LAST_RATE_UPDATE = current_time
     return rate
 
-# Поток для проверки pending транзакций
+# Поток для проверки pending транзакций [УЛУЧШЕНА ОБРАБОТКА ОШИБОК]
 async def check_pending_transactions_loop():
     while True:
         try:
@@ -594,7 +612,7 @@ async def process_successful_payment(transaction):
     except Exception as e:
         logger.error(f"Error processing successful payment: {e}")
 
-# Поток для сброса API лимитов
+# Поток для сброса API лимитов [УЛУЧШЕНА ОБРАБОТКА ОШИБОК]
 async def reset_api_limits_loop():
     while True:
         try:
@@ -1242,38 +1260,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
                 builder.row(InlineKeyboardButton(text=district, callback_data=f"dist_{district}"))
             builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_category"))
             
-            # Используем функцию для показа меню с изображением
-            await show_menu_with_image(
-                callback.message,
-                get_cached_text(lang, 'select_district'),
-                builder.as_markup(),
-                get_bot_setting('district_menu_image'),
-                state
-            )
-            await state.set_state(Form.district)
-        elif data.startswith('dist_'):
-            district = data.replace('dist_', '')
-            await state.update_data(district=district)
-            
-            # Получаем доступные типы доставки
-            delivery_types = []
-            for del_type in get_delivery_types_cache():
-                if await is_delivery_type_available(del_type):
-                    delivery_types.append(del_type)
-            
-            if not delivery_types:
-                sent_message = await callback.message.answer(
-                    text="Нет доступных типов доставки"
-                )
-                await state.update_data(last_message_id=sent_message.message_id)
-                return
-            
-            builder = InlineKeyboardBuilder()
-            for del_type in delivery_types:
-                builder.row(InlineKeyboardButton(text=del_type, callback_data=f"del_{del_type}"))
-            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_district"))
-            
-            # Используем функцию для показа меню с изображением
+                       # Используем функцию для показа меню с изображением
             await show_menu_with_image(
                 callback.message,
                 get_cached_text(lang, 'select_delivery'),
@@ -1584,7 +1571,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
         
         if data == 'back_to_confirmation':
-            state_data = await state.get_data()
+                        state_data = await state.get_data()
             city = state_data.get('city')
             product = state_data.get('product')
             price = state_data.get('price')
@@ -1678,7 +1665,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                 product_id
             )
             
-            # Сохраняем product_id в state для использования после оплаты
+            # Сохраняем product_id в state для использования после оплата
             await state.update_data(product_id=product_id)
             
             # Новый формат текста для покупки
@@ -1986,7 +1973,8 @@ async def handle_text(message: types.Message, state: FSMContext):
             await state.update_data(balance_amount=float(text))
             await process_balance(message, state)
         else:
-            await show_main_menu(message, state, user_id, lang)
+            # Создаем новую задачу для показа меню вместо прямого вызова
+            asyncio.create_task(show_main_menu(message, state, user_id, lang))
             await state.set_state(Form.main_menu)
     except Exception as e:
         logger.error(f"Error handling text: {e}")
@@ -2054,3 +2042,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

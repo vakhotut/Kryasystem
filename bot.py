@@ -1,4 +1,3 @@
-
 # bot.py
 import logging
 import random
@@ -876,7 +875,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             products_cache = get_products_cache()
             if city not in products_cache or not any(product_info.get('quantity', 0) > 0 for product_info in products_cache[city].values()):
                 await callback.message.answer(
-                    "🛒 Этот город пока пустой. Ожидайте пополнения. Следите за нашим каналом в ожидании пополнения."
+                    "🛒 Этот город пока пустой. Ожидайте пополнения. Следите за нашим канал в ожидании пополнения."
                 )
                 return
         
@@ -924,7 +923,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             await callback.message.answer("Переходим в канал...")
         elif data == 'reviews':
             # Открываем ссылку на отзывы
-            await callback.message.answer("Переходим к отзывам...")
+            await callback.message.answer("Переходим к отзываы...")
         elif data == 'website':
             # Открываем ссылку на сайт
             await callback.message.answer("Переходим на сайт...")
@@ -1386,51 +1385,51 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
                 get_bot_setting('delivery_menu_image'),
                 state
             )
+            await state.set_state(Form.delivery)
+        
+        # ИСПРАВЛЕНИЕ: Обработка выбора типа доставки
+        elif data.startswith('del_'):
+            delivery_type = data.replace('del_', '')
+            
+            # Проверяем доступность типа доставки
+            if not await is_delivery_type_available(delivery_type):
+                sent_message = await callback.message.answer(
+                    text="Этот тип доставки временно недоступен"
+                )
+                await state.update_data(last_message_id=sent_message.message_id)
+                return
+            
+            await state.update_data(delivery_type=delivery_type)
+            
+            state_data = await state.get_data()
+            city = state_data.get('city')
+            product = state_data.get('product')
+            price = state_data.get('price')
+            district = state_data.get('district')
+            
+            order_text = get_cached_text(
+                lang, 
+                'order_summary',
+                product=product,
+                price=price,
+                district=district,
+                delivery_type=delivery_type
+            )
+            
+            builder = InlineKeyboardBuilder()
+            builder.row(InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"))
+            builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_delivery"))
+            
+            # Используем функцию для показа меню с изображением
+            await show_menu_with_image(
+                callback.message,
+                order_text,
+                builder.as_markup(),
+                get_bot_setting('confirmation_menu_image'),
+                state
+            )
             await state.set_state(Form.confirmation)
-        else:
-            # Если callback_data не распознан, обрабатываем как тип доставки
-            if data.startswith('del_'):
-                delivery_type = data.replace('del_', '')
-                
-                # Проверяем доступность типа доставки
-                if not await is_delivery_type_available(delivery_type):
-                    sent_message = await callback.message.answer(
-                        text="Этот тип доставки временно недоступен"
-                    )
-                    await state.update_data(last_message_id=sent_message.message_id)
-                    return
-                
-                await state.update_data(delivery_type=delivery_type)
-                
-                state_data = await state.get_data()
-                city = state_data.get('city')
-                product = state_data.get('product')
-                price = state_data.get('price')
-                district = state_data.get('district')
-                
-                order_text = get_cached_text(
-                    lang, 
-                    'order_summary',
-                    product=product,
-                    price=price,
-                    district=district,
-                    delivery_type=delivery_type
-                )
-                
-                builder = InlineKeyboardBuilder()
-                builder.row(InlineKeyboardButton(text="✅ Да", callback_data="confirm_yes"))
-                builder.row(InlineKeyboardButton(text="❌ Нет", callback_data="confirm_no"))
-                builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_delivery"))
-                
-                # Используем функцию для показа меню с изображением
-                await show_menu_with_image(
-                    callback.message,
-                    order_text,
-                    builder.as_markup(),
-                    get_bot_setting('confirmation_menu_image'),
-                    state
-                )
-                await state.set_state(Form.confirmation)
     except Exception as e:
         logger.exception("Error processing delivery")
         await callback.answer("Произошла ошибка. Попробуйте позже.")

@@ -69,6 +69,7 @@ class Form(StatesGroup):
     balance = State()
     balance_menu = State()
     topup_currency = State()
+    order_history = State()  # Добавлено новое состояние для истории заказов
 
 # Глобальные переменные
 bot = Bot(token=TOKEN, timeout=30)  # Увеличенный таймаут
@@ -942,6 +943,9 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
         elif data == 'main_menu':
             await show_main_menu(callback.message, state, user_id, lang)
             await state.set_state(Form.main_menu)
+        elif data.startswith('view_order_'):
+            # Обработка просмотра деталей заказа из главного меню
+            await view_order_details(callback, state)
     except Exception as e:
         logger.exception("Error processing main menu")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
@@ -1000,6 +1004,7 @@ async def show_order_history(callback: types.CallbackQuery, state: FSMContext):
         )
         
         await state.update_data(last_message_id=sent_message.message_id)
+        await state.set_state(Form.order_history)  # Устанавливаем состояние истории заказов
         await callback.answer()
         
     except Exception as e:
@@ -1007,7 +1012,7 @@ async def show_order_history(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Обработчик для просмотра деталей заказа (ИСПРАВЛЕННЫЙ)
-@dp.callback_query(F.data.startswith("view_order_"))
+@dp.callback_query(Form.order_history, F.data.startswith("view_order_"))
 async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
     try:
         order_id = int(callback.data.replace("view_order_", ""))
@@ -1126,6 +1131,40 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.exception("Error in view order handler")
         await callback.answer("Произошла ошибка при получении информации о заказе")
+
+# Обработчик для кнопки "Главное меню" из состояния истории заказов
+@dp.callback_query(Form.order_history, F.data == "main_menu")
+async def process_order_history_main_menu(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
+        user_data = await get_user(user_id)
+        lang = user_data['language'] or 'ru'
+        
+        # Удаляем предыдущее сообщение
+        state_data = await state.get_data()
+        if 'last_message_id' in state_data:
+            await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
+        
+        await show_main_menu(callback.message, state, user_id, lang)
+        await state.set_state(Form.main_menu)
+        await callback.answer()
+    except Exception as e:
+        logger.exception("Error processing main menu from order history")
+        await callback.answer("Произошла ошибка. Попробуйте позже.")
+
+# Обработчик для кнопки "Назад к истории" из состояния просмотра заказа
+@dp.callback_query(Form.order_history, F.data == "order_history")
+async def process_back_to_order_history(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        await callback.answer()
+        await show_order_history(callback, state)
+    except Exception as e:
+        logger.exception("Error going back to order history")
+        await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.balance_menu)
 async def process_balance_menu(callback: types.CallbackQuery, state: FSMContext):

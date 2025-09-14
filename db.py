@@ -900,7 +900,8 @@ async def refresh_cache():
     logger.info("Все кэши принудительно обновлены")
 
 # Функции для работы с базой данных
-@timed_lru_cache(300)  # Кэширование на 5 минут
+# Кэширование на 5 минут
+
 async def get_user(user_id):
     try:
         async with db_pool.acquire() as conn:

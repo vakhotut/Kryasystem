@@ -1571,7 +1571,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
         
         if data == 'back_to_confirmation':
-                        state_data = await state.get_data()
+            state_data = await state.get_data()
             city = state_data.get('city')
             product = state_data.get('product')
             price = state_data.get('price')

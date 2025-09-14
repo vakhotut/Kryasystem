@@ -152,7 +152,7 @@ async def safe_send_message(chat_id, text, reply_markup=None, parse_mode=None):
     try:
         return await bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as e:
-        logger.error(f"Error sending message: {e}")
+        logger.exception("Error sending message")
         return None
 
 # Получение языка пользователя
@@ -179,7 +179,7 @@ async def delete_previous_message(chat_id: int, message_id: int):
     except Exception as e:
         # Игнорируем ошибку "message not found"
         if "message to delete not found" not in str(e):
-            logger.error(f"Error deleting message: {e}")
+            logger.exception("Error deleting message")
 
 # Безопасное удаление предыдущего сообщения с очисткой состояния
 async def safe_delete_previous_message(chat_id: int, message_id: int, state: FSMContext):
@@ -188,7 +188,7 @@ async def safe_delete_previous_message(chat_id: int, message_id: int, state: FSM
             await bot.delete_message(chat_id=chat_id, message_id=message_id)
         except Exception as e:
             if "message to delete not found" not in str(e):
-                logger.error(f"Error deleting message: {e}")
+                logger.exception("Error deleting message")
     
     # Очищаем ID сообщения из состояния
     await state.update_data(last_message_id=None)
@@ -223,7 +223,7 @@ async def show_menu_with_image(message, caption, keyboard, image_url, state):
             else:
                 raise
         except Exception as e:
-            logger.error(f"Error sending photo: {e}")
+            logger.exception("Error sending photo")
             # Fallback to text message
             sent_message = await message.answer(
                 text=caption,
@@ -233,7 +233,7 @@ async def show_menu_with_image(message, caption, keyboard, image_url, state):
         await state.update_data(last_message_id=sent_message.message_id)
         return sent_message
     except Exception as e:
-        logger.error(f"Error showing menu with image: {e}")
+        logger.exception("Error showing menu with image")
         # Fallback to text message if image fails
         sent_message = await message.answer(
             text=caption,
@@ -276,7 +276,7 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                                     
                                 await safe_send_message(user_id, notification_text)
                             except Exception as e:
-                                logger.error(f"Error sending notification: {e}")
+                                logger.exception("Error sending notification")
                         
                         # Проверяем каждую минуту
                         await asyncio.sleep(60)
@@ -332,16 +332,16 @@ async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
                                     get_cached_text(lang, 'ban_message')
                                 )
                         except Exception as e:
-                            logger.error(f"Error sending expiration message: {e}")
+                            logger.exception("Error sending expiration message")
                         
                         break
                 except Exception as e:
-                    logger.error(f"Error in invoice notification loop: {e}")
+                    logger.exception("Error in invoice notification loop")
                     await asyncio.sleep(60)
         except asyncio.CancelledError:
             logger.info(f"Invoice notification task for user {user_id} was cancelled")
         except Exception as e:
-            logger.error(f"Error in invoice notification loop: {e}")
+            logger.exception("Error in invoice notification loop")
         finally:
             # Убедиться, что задача удалена из глобального словаря
             if user_id in invoice_notifications:
@@ -377,7 +377,7 @@ async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
             state
         )
     except Exception as e:
-        logger.error(f"Error showing balance menu: {e}")
+        logger.exception("Error showing balance menu")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Функция для показа меню выбора валюты пополнения
@@ -406,7 +406,7 @@ async def show_topup_currency_menu(callback: types.CallbackQuery, state: FSMCont
             state
         )
     except Exception as e:
-        logger.error(f"Error showing topup currency menu: {e}")
+        logger.exception("Error showing topup currency menu")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Функция для показа активного инвойса
@@ -467,7 +467,7 @@ async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, 
                         parse_mode='Markdown'
                     )
             except Exception as e:
-                logger.error(f"Error sending invoice with photo: {e}")
+                logger.exception("Error sending invoice with photo")
                 # Fallback: отправляем только текст
                 await callback.message.answer(
                     text=payment_text,
@@ -475,7 +475,7 @@ async def show_active_invoice(callback: types.CallbackQuery, state: FSMContext, 
                     parse_mode='Markdown'
                 )
     except Exception as e:
-        logger.error(f"Error showing active invoice: {e}")
+        logger.exception("Error showing active invoice")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Функция для получения курса LTC с кешированием на 1 час
@@ -526,7 +526,7 @@ async def check_pending_transactions_loop():
             
             await asyncio.sleep(60)  # Проверяем каждую минуту
         except Exception as e:
-            logger.error(f"Error in check_pending_transactions: {e}")
+            logger.exception("Error in check_pending_transactions")
             await asyncio.sleep(60)
 
 # Функция для обработки успешной оплаты
@@ -610,7 +610,7 @@ async def process_successful_payment(transaction):
                 )
                 
     except Exception as e:
-        logger.error(f"Error processing successful payment: {e}")
+        logger.exception("Error processing successful payment")
 
 # Поток для сброса API лимитов [УЛУЧШЕНА ОБРАБОТКА ОШИБОК]
 async def reset_api_limits_loop():
@@ -620,7 +620,7 @@ async def reset_api_limits_loop():
             await reset_api_limits()
             await asyncio.sleep(86400)  # 24 часа
         except Exception as e:
-            logger.error(f"Error resetting API limits: {e}")
+            logger.exception("Error resetting API limits")
             await asyncio.sleep(3600)  # Повторяем через час при ошибке
 
 # Обработчики команд и состояний
@@ -665,7 +665,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await message.answer('Выберите язык / Select language / აირჩიეთ ენა:', reply_markup=builder.as_markup())
         await state.set_state(Form.language)
     except Exception as e:
-        logger.error(f"Error in start command: {e}")
+        logger.exception("Error in start command")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.language)
@@ -700,7 +700,7 @@ async def process_language(callback: types.CallbackQuery, state: FSMContext):
                 caption=get_cached_text(lang_code, 'captcha_enter')
             )
         except Exception as e:
-            logger.error(f"Error sending captcha image: {e}")
+            logger.exception("Error sending captcha image")
             # Fallback: отправляем капчу текстом
             await callback.message.answer(
                 text=f"{get_cached_text(lang_code, 'captcha_enter')}\n\nКод: {captcha_code}"
@@ -708,8 +708,7 @@ async def process_language(callback: types.CallbackQuery, state: FSMContext):
         
         await state.set_state(Form.captcha)
     except Exception as e:
-        logger.error(f"Error processing language: {e}")
-        logger.error(traceback.format_exc())
+        logger.exception("Error processing language")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.message(Form.captcha)
@@ -740,7 +739,7 @@ async def process_captcha(message: types.Message, state: FSMContext):
             lang = user_data['language'] or 'ru'
             await message.answer(get_cached_text(lang, 'captcha_failed'))
     except Exception as e:
-        logger.error(f"Error processing captcha: {e}")
+        logger.exception("Error processing captcha")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 async def show_main_menu(message: types.Message, state: FSMContext, user_id: int, lang: str):
@@ -814,7 +813,7 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
             state
         )
     except Exception as e:
-        logger.error(f"Error showing main menu: {e}")
+        logger.exception("Error showing main menu")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.main_menu)
@@ -912,7 +911,7 @@ async def process_main_menu(callback: types.CallbackQuery, state: FSMContext):
             await show_main_menu(callback.message, state, user_id, lang)
             await state.set_state(Form.main_menu)
     except Exception as e:
-        logger.error(f"Error processing main menu: {e}")
+        logger.exception("Error processing main menu")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Новая функция для отображения истории заказов
@@ -972,7 +971,7 @@ async def show_order_history(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         
     except Exception as e:
-        logger.error(f"Error showing order history: {e}")
+        logger.exception("Error showing order history")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Обработчик для просмотра деталей заказа
@@ -1038,7 +1037,7 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
                 )
                 await state.update_data(last_message_id=sent_message.message_id)
             except Exception as e:
-                logger.error(f"Error sending photo: {e}")
+                logger.exception("Error sending photo")
                 # Fallback - отправляем только текст
                 sent_message = await callback.message.answer(
                     text=order_text,
@@ -1057,7 +1056,7 @@ async def view_order_details(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         
     except Exception as e:
-        logger.error(f"Error in view order handler: {e}")
+        logger.exception("Error in view order handler")
         await callback.answer("Произошла ошибка при получении информации о заказе")
 
 @dp.callback_query(Form.balance_menu)
@@ -1081,7 +1080,7 @@ async def process_balance_menu(callback: types.CallbackQuery, state: FSMContext)
             await show_main_menu(callback.message, state, user_id, lang)
             await state.set_state(Form.main_menu)
     except Exception as e:
-        logger.error(f"Error processing balance menu: {e}")
+        logger.exception("Error processing balance menu")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.topup_currency)
@@ -1107,7 +1106,7 @@ async def process_topup_currency(callback: types.CallbackQuery, state: FSMContex
             await callback.message.answer(get_cached_text(lang, 'balance_add'))
             await state.set_state(Form.balance)
     except Exception as e:
-        logger.error(f"Error processing topup currency: {e}")
+        logger.exception("Error processing topup currency")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.category)
@@ -1178,7 +1177,7 @@ async def process_category(callback: types.CallbackQuery, state: FSMContext):
         )
         await state.set_state(Form.district)
     except Exception as e:
-        logger.error(f"Error processing category: {e}")
+        logger.exception("Error processing category")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.district)
@@ -1270,7 +1269,7 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
             )
             await state.set_state(Form.delivery)
     except Exception as e:
-        logger.error(f"Error processing district: {e}")
+        logger.exception("Error processing district")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.delivery)
@@ -1359,7 +1358,7 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
         )
         await state.set_state(Form.confirmation)
     except Exception as e:
-        logger.error(f"Error processing delivery: {e}")
+        logger.exception("Error processing delivery")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.confirmation)
@@ -1443,7 +1442,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
             await show_main_menu(callback.message, state, user_id, lang)
             await state.set_state(Form.main_menu)
     except Exception as e:
-        logger.error(f"Error processing confirmation: {e}")
+        logger.exception("Error processing confirmation")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Новая функция для обработки оплаты балансом
@@ -1545,11 +1544,11 @@ async def pay_with_balance(callback: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             # В случае ошибки возвращаем товар
             await release_product(product_row['id'])
-            logger.error(f"Error in pay_with_balance: {e}")
+            logger.exception("Error in pay_with_balance")
             await callback.answer("Произошла ошибка. Попробуйте позже.")
         
     except Exception as e:
-        logger.error(f"Error in pay_with_balance: {e}")
+        logger.exception("Error in pay_with_balance")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.crypto_currency)
@@ -1644,7 +1643,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             try:
                 address_data = ltc_wallet.generate_address()
             except Exception as e:
-                logger.error(f"Error generating LTC address: {e}")
+                logger.exception("Error generating LTC address")
                 await callback.message.answer(get_cached_text(lang, 'error'))
                 return
             
@@ -1698,7 +1697,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
                     parse_mode='Markdown'
                 )
             except Exception as e:
-                logger.error(f"Error sending QR code: {e}")
+                logger.exception("Error sending QR code")
                 await callback.message.answer(
                     text=payment_text,
                     reply_markup=builder.as_markup(),
@@ -1714,7 +1713,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         else:
             await callback.message.answer("Currently only LTC is supported")
     except Exception as e:
-        logger.error(f"Error processing crypto currency: {e}")
+        logger.exception("Error processing crypto currency")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 # Функция для отложенной проверки инвойса
@@ -1747,7 +1746,7 @@ async def check_invoice_after_delay(order_id, user_id, lang):
                     "⏰ Время оплаты истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
                 )
             except Exception as e:
-                logger.error(f"Error sending delay notification: {e}")
+                logger.exception("Error sending delay notification")
 
 @dp.message(Form.balance)
 async def process_balance(message: types.Message, state: FSMContext):
@@ -1777,7 +1776,7 @@ async def process_balance(message: types.Message, state: FSMContext):
             try:
                 address_data = ltc_wallet.generate_address()
             except Exception as e:
-                logger.error(f"Error generating LTC address: {e}")
+                logger.exception("Error generating LTC address")
                 await message.answer(get_cached_text(lang, 'error'))
                 return
             
@@ -1830,7 +1829,7 @@ async def process_balance(message: types.Message, state: FSMContext):
                     parse_mode='Markdown'
                 )
             except Exception as e:
-                logger.error(f"Error sending QR code: {e}")
+                logger.exception("Error sending QR code")
                 await message.answer(
                     text=payment_text,
                     reply_markup=builder.as_markup(),
@@ -1846,7 +1845,7 @@ async def process_balance(message: types.Message, state: FSMContext):
         except ValueError:
             await message.answer(get_cached_text(lang, 'error'))
     except Exception as e:
-        logger.error(f"Error processing balance: {e}")
+        logger.exception("Error processing balance")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 # Обработчики для кнопок инвойса
@@ -1888,7 +1887,7 @@ async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
             await callback.message.answer("❌ Активный инвойс не найден")
             
     except Exception as e:
-        logger.error(f"Error checking invoice: {e}")
+        logger.exception("Error checking invoice")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(F.data == "cancel_invoice")
@@ -1931,7 +1930,7 @@ async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
         try:
             await callback.message.delete()
         except Exception as e:
-            logger.error(f"Error deleting invoice message: {e}")
+            logger.exception("Error deleting invoice message")
         
         # Отправляем новое текстовое сообщение
         await callback.message.answer("❌ Инвойс отменен. Товар возвращен в продажу.")
@@ -1939,7 +1938,7 @@ async def cancel_invoice(callback: types.CallbackQuery, state: FSMContext):
         await show_main_menu(callback.message, state, user_id, lang)
         await state.set_state(Form.main_menu)
     except Exception as e:
-        logger.error(f"Error cancelling invoice: {e}")
+        logger.exception("Error cancelling invoice")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(F.data == "back_to_topup_menu")
@@ -1949,12 +1948,12 @@ async def back_to_topup_menu(callback: types.CallbackQuery, state: FSMContext):
         try:
             await callback.message.delete()
         except Exception as e:
-            logger.error(f"Error deleting message: {e}")
+            logger.exception("Error deleting message")
         
         await show_topup_currency_menu(callback, state)
         await state.set_state(Form.topup_currency)
     except Exception as e:
-        logger.error(f"Error going back to topup menu: {e}")
+        logger.exception("Error going back to topup menu")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.message(F.text)
@@ -1965,25 +1964,21 @@ async def handle_text(message: types.Message, state: FSMContext):
         if await check_ban(user_id):
             return
             
-        current_state = await state.get_state()
         user_data = await get_user(user_id)
         lang = user_data['language'] or 'ru'
         text = message.text
         
-        # Если мы в состоянии баланса, обрабатываем сумму
-        if current_state == Form.balance.state:
-            if text.isdigit():
-                await state.update_data(balance_amount=float(text))
-                await process_balance(message, state)
-            else:
-                await message.answer(get_cached_text(lang, 'error'))
+        if text.isdigit():
+            await state.update_data(balance_amount=float(text))
+            await process_balance(message, state)
         else:
-            # Для других состояний просто показываем главное меню
+            # ЗАМЕНА: используем await вместо create_task
             await show_main_menu(message, state, user_id, lang)
             await state.set_state(Form.main_menu)
     except Exception as e:
-        logger.error(f"Error handling text: {e}")
+        logger.exception("Error handling text")
         await message.answer("Произошла ошибка. Попробуйте позже.")
+
 async def main():
     # Проверка на единственный экземпляр
     if not singleton_check():
@@ -2033,17 +2028,14 @@ async def main():
                 logger.info("Bot task was cancelled")
                 break
             except Exception as e:
-                logger.error(f"Unexpected error: {e}. Restarting in 5 seconds...")
-                logger.error(traceback.format_exc())
+                logger.exception("Unexpected error")
                 await asyncio.sleep(5)
                 
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        logger.error(traceback.format_exc())
+        logger.exception("Failed to start bot")
     finally:
         if db_pool:
             await db_pool.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
-

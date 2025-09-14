@@ -7,6 +7,7 @@ import traceback
 from functools import lru_cache, wraps
 from typing import Dict, List, Any, Optional, Tuple
 import time
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -584,7 +585,7 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • 3 წარუ�муატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
-                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
+                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუ�муატებელი მცდელობები: {failed_count}/3',
                 'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
                 'product_reserved': '✅ პროდუქტი დაჯავშნულია',
@@ -876,6 +877,27 @@ async def db_execute(query, *args, timeout=2.0):
     except Exception as e:
         logger.error(f"Unexpected error in query '{query}': {e}")
         raise
+
+# Контекстный менеджер для работы с БД [ДОБАВЛЕНА ОБРАБОТКА ОШИБОК]
+@contextlib.asynccontextmanager
+async def db_connection():
+    conn = None
+    try:
+        conn = await db_pool.acquire()
+        yield conn
+    except Exception as e:
+        logger.error(f"Error acquiring database connection: {e}")
+        raise
+    finally:
+        if conn:
+            await db_pool.release(conn)
+
+# Функция для принудительного обновления кэша [НОВАЯ ФУНКЦИЯ]
+async def refresh_cache():
+    """Принудительное обновление всех кэшей"""
+    global texts_cache, cities_cache, districts_cache, products_cache, delivery_types_cache, categories_cache, subcategories_cache, bot_settings_cache
+    await load_cache()
+    logger.info("Все кэши принудительно обновлены")
 
 # Функции для работы с базой данных
 @timed_lru_cache(300)  # Кэширование на 5 минут

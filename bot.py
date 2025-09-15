@@ -33,10 +33,11 @@ from db import (
     get_product_by_name_city, get_product_by_id, get_purchase_with_product,
     get_api_limits, increment_api_request, reset_api_limits,
     is_district_available, is_delivery_type_available,
-    add_user_referral, generate_referral_code, db_connection, refresh_cache
+    add_user_referral, generate_referral_code, db_connection, refresh_cache,
+    add_generated_address, update_address_balance, get_deposit_address, create_deposit, update_deposit_confirmations
 )
 from ltc_hdwallet import ltc_wallet
-from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats
+from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats, monitor_deposits, get_confirmations_count
 
 # Настройки логирования
 logging.basicConfig(
@@ -53,6 +54,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 LAST_RATE_UPDATE = 0
 RATE_UPDATE_INTERVAL = 3600  # 1 час
 TRANSACTION_CHECK_DELAY = 600  # 10 минут
+CONFIRMATIONS_REQUIRED = 3  # Требуемое количество подтверждений
 
 # Состояния разговора
 class Form(StatesGroup):
@@ -70,6 +72,7 @@ class Form(StatesGroup):
     balance_menu = State()
     topup_currency = State()
     order_history = State()
+    deposit_address = State()
 
 # Глобальные переменные
 bot = Bot(token=TOKEN, timeout=30)
@@ -569,7 +572,7 @@ async def check_active_invoice_for_user(user_id, invoice_type="any"):
             )
         elif invoice_type == "purchase":
             invoice = await conn.fetchrow(
-                "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW() AND product_info NOT LIKE '%Пополнение баланса%'",
+                "SELECT * FROM transactions WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW() AND product_info NOT LIKE '%Пopолнение баланса%'",
                 user_id
             )
         else:
@@ -1078,10 +1081,106 @@ async def process_topup_currency(callback: types.CallbackQuery, state: FSMContex
         elif data == 'topup_ltc':
             await state.update_data(topup_currency='LTC')
             
-            await callback.message.answer(get_cached_text(lang, 'balance_add'))
-            await state.set_state(Form.balance)
+            # Генерируем новый адрес для пополнения
+            address_data = ltc_wallet.generate_address()
+            address = address_data['address']
+            index = address_data['index']
+            
+            # Сохраняем адрес в базу данных
+            await add_generated_address(address, index, user_id, "Balance topup")
+            
+            # Получаем курс LTC
+            ltc_rate = await get_ltc_usd_rate_cached()
+            
+            # Создаем сообщение с адресом
+            message = f"💳 Для пополнения баланса отправьте LTC на адрес:\n\n`{address}`\n\n"
+            message += f"После {CONFIRMATIONS_REQUIRED} подтверждений сети средства будут зачислены на ваш баланс.\n\n"
+            message += f"📊 Текущий курс: 1 LTC = ${ltc_rate:.2f}"
+            
+            # Создаем QR-код
+            qr_code = ltc_wallet.get_qr_code(address)
+            
+            builder = InlineKeyboardBuilder()
+            builder.row(InlineKeyboardButton(text="🔄 Проверить статус", callback_data="check_deposit_status"))
+            builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_topup_menu"))
+            
+            try:
+                await callback.message.answer_photo(
+                    photo=qr_code,
+                    caption=message,
+                    reply_markup=builder.as_markup(),
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.exception("Error sending QR code")
+                await callback.message.answer(
+                    text=message,
+                    reply_markup=builder.as_markup(),
+                    parse_mode='Markdown'
+                )
+            
+            await state.set_state(Form.deposit_address)
     except Exception as e:
         logger.exception("Error processing topup currency")
+        await callback.answer("Произошла ошибка. Попробуйте позже.")
+
+@dp.callback_query(Form.deposit_address, F.data == "check_deposit_status")
+async def check_deposit_status(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        await callback.answer("Проверяем статус депозита...")
+        
+        user_id = callback.from_user.id
+        
+        if await check_ban(user_id):
+            return
+            
+        user_data = await get_user(user_id)
+        lang = user_data['language'] or 'ru'
+        
+        # Получаем последний адрес пользователя
+        address = await get_deposit_address(user_id)
+        
+        if not address:
+            await callback.message.answer("❌ Адрес для пополнения не найден")
+            return
+            
+        # Проверяем транзакции для этого адреса
+        from api import get_address_transactions
+        transactions = await get_address_transactions(address)
+        
+        if not transactions:
+            await callback.message.answer("📭 На адрес еще не поступали транзакции")
+            return
+            
+        # Ищем неподтвержденные депозиты
+        async with db_connection() as conn:
+            deposits = await conn.fetch(
+                "SELECT * FROM deposits WHERE address = $1 AND user_id = $2 ORDER BY created_at DESC",
+                address, user_id
+            )
+            
+        if not deposits:
+            await callback.message.answer("📭 Транзакции найдены, но еще не обработаны системой")
+            return
+            
+        for deposit in deposits:
+            if deposit['status'] == 'confirmed':
+                await callback.message.answer(
+                    f"✅ Депозит подтвержден! Зачислено: ${deposit['amount_usd']:.2f}"
+                )
+                return
+            elif deposit['status'] == 'pending':
+                confirmations = await get_confirmations_count(deposit['txid'])
+                await callback.message.answer(
+                    f"⏳ Депозит в обработке: {confirmations}/{CONFIRMATIONS_REQUIRED} подтверждений\n"
+                    f"💰 Сумма: ${deposit['amount_usd']:.2f}"
+                )
+                return
+                
+        await callback.message.answer("📭 Нет активных депозитов для этого адреса")
+        
+    except Exception as e:
+        logger.exception("Error checking deposit status")
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(Form.category)
@@ -1958,6 +2057,7 @@ async def main():
         
         asyncio.create_task(check_pending_transactions_loop())
         asyncio.create_task(reset_api_limits_loop())
+        asyncio.create_task(monitor_deposits())
         
         while True:
             try:

@@ -12,20 +12,11 @@ from bip_utils import (
     Bip39MnemonicValidator,
     Bip39SeedGenerator,
     Bip39WordsNum,
-    Bip39Languages,
-    Bip84,  # Изменено с Bip44 на Bip84
-    Bip84Coins,  # Изменено с Bip44Coins на Bip84Coins
-    Bip84Changes,  # Изменено с Bip44Changes на Bip84Changes
-    Bip44Coins,  # Оставляем для обратной совместимости
-    Bip44Changes  # Оставляем для обратной совместимости
-)
-
-# Добавим валидацию адресов Litecoin
-from bip_utils import (
-    BchAddrConverter,
-    LtcAddrDecoder,
-    LtcAddrEncoder,
-    P2WPKH
+    Bip84,  # BIP84 вместо BIP44
+    Bip84Coins,  # BIP84 монеты
+    Bip44Changes,  # Для BIP84 используем Bip44Changes
+    LtcAddrDecoder,  # Для валидации адресов
+    LtcAddrEncoder
 )
 
 # Попытаемся импортировать дополнительные библиотеки безопасности
@@ -141,16 +132,16 @@ class LTCWallet:
         # Генерация seed из мнемоники
         self.seed_bytes = Bip39SeedGenerator(self.mnemonic).Generate()
         
-        # Создание BIP84 кошелька для Litecoin (изменено с BIP44)
+        # Создание BIP84 кошелька для Litecoin
         coin_type = self.config.get('coin_type', Bip84Coins.LITECOIN)
-        self.bip84_mst = Bip84.FromSeed(self.seed_bytes, coin_type)  # Изменено с Bip44 на Bip84
+        self.bip84_mst = Bip84.FromSeed(self.seed_bytes, coin_type)
         
         logger.info("LTC Wallet initialized with enhanced security")
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Загрузка конфигурации из файла"""
         default_config = {
-            'coin_type': Bip84Coins.LITECOIN,  # Изменено с Bip44Coins.LITECOIN
+            'coin_type': Bip84Coins.LITECOIN,
             'index_storage_path': 'wallet_state.json',
             'max_addresses_per_second': 5,
             'mnemonic_length': 12  # 12, 15, 18, 21 или 24 слова
@@ -288,7 +279,7 @@ class LTCWallet:
                 address_index = self.index_manager.index
             
             # Генерация адреса по индексу: m/84'/2'/0'/0/address_index (BIP84)
-            bip84_acc = self.bip84_mst.Purpose().Coin().Account(0).Change(Bip84Changes.CHAIN_EXT).AddressIndex(address_index)
+            bip84_acc = self.bip84_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_index)
             
             # Получение адреса и ключей
             address = bip84_acc.PublicKey().ToAddress()
@@ -336,11 +327,8 @@ class LTCWallet:
             
             # Проверка Legacy адресов (начинаются с L или M)
             elif address.startswith('L') or address.startswith('M'):
-                # Конвертируем в cash адрес для проверки
-                cash_addr = BchAddrConverter.ToCashAddress(address)
-                # Конвертируем обратно для проверки
-                legacy_addr = BchAddrConverter.ToLegacyAddress(cash_addr)
-                return legacy_addr == address
+                # Для Legacy адресов используем простую проверку формата
+                return len(address) >= 26 and len(address) <= 34 and all(c in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz' for c in address)
             
             return False
         except:
@@ -370,7 +358,7 @@ class LTCWallet:
         try:
             # Проверка базовой функциональности
             test_account = self.bip84_mst.Purpose().Coin().Account(0)
-            test_address = test_account.Change(Bip84Changes.CHAIN_EXT).AddressIndex(0)
+            test_address = test_account.Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
             
             # Валидация тестового адреса
             address_valid = self.validate_address(test_address.PublicKey().ToAddress())
@@ -487,4 +475,12 @@ except Exception as e:
             return "ERROR"
         def validate_address(self, address):
             return False
+        def health_check(self):
+            return {"status": "error", "error": str(e)}
+        def backup_wallet(self, backup_path):
+            return False
+        def restore_wallet(self, backup_path):
+            return False
+        def get_balance_info(self, address):
+            return {"address": address, "error": str(e)}
     ltc_wallet = FallbackWallet()

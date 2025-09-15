@@ -7,13 +7,26 @@ import time
 import json
 from bs4 import BeautifulSoup
 import re
+import hashlib
+import hmac
+import ecdsa
+from base58 import b58decode, b58encode
+from Crypto.Hash import SHA256
+from Crypto.PublicKey import RSA
+from Crypto.Signature import pkcs1_15
+import sqlite3
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+# Конфигурация
 API_REQUEST_TIMEOUT = 10.0
-CACHE_TTL = 60  # Время жизни кеша в секундах
-RATE_CACHE_TTL = 30  # Время жизни кеша курсов в секундах
-MIN_CONFIRMATIONS = 6  # Минимальное количество подтверждений для безопасности
+CACHE_TTL = 60
+RATE_CACHE_TTL = 30
+MIN_CONFIRMATIONS = 6
+MAX_RETRY_ATTEMPTS = 3
+MEMPOOL_UPDATE_INTERVAL = 30  # seconds
+MEMPOOL_CLEANUP_INTERVAL = 300  # seconds
 
 # API ключи
 COINGECKO_API_KEY = os.getenv('COINGECKO_API_KEY', '')
@@ -22,6 +35,9 @@ TESTNET = os.getenv('TESTNET', 'False').lower() == 'true'
 # Кеши
 _rate_cache = {}
 _address_cache = {}
+_utxo_cache = {}
+_transaction_cache = {}
+_mempool_cache = {}
 _cache_lock = asyncio.Lock()
 
 # WebSocket соединение
@@ -29,11 +45,36 @@ _websocket = None
 _websocket_lock = asyncio.Lock()
 _tracked_addresses: Set[str] = set()
 
-# DB helpers (assumed to exist in your project)
+# Мемпул отслеживания
+_mempool_transactions = {}
+_mempool_lock = asyncio.Lock()
+_mempool_task = None
+
+# DB helpers
 from db import increment_api_request, get_api_limits
 
+class UTXOError(Exception):
+    """Базовое исключение для ошибок UTXO"""
+    pass
+
+class DoubleSpendError(UTXOError):
+    """Ошибка двойного расходования"""
+    pass
+
+class InvalidSignatureError(UTXOError):
+    """Ошибка неверной подписи"""
+    pass
+
+class InsufficientConfirmationsError(UTXOError):
+    """Недостаточно подтверждений"""
+    pass
+
+class MempoolError(Exception):
+    """Ошибка мемпула"""
+    pass
+
 async def check_api_limit(api_name: str) -> bool:
-    """Проверяет лимиты API и возвращает True если можно сделать запрос"""
+    """Проверяет лимиты API"""
     try:
         api_limits = await get_api_limits()
         for limit in api_limits:
@@ -44,40 +85,57 @@ async def check_api_limit(api_name: str) -> bool:
                 else:
                     logger.warning(f"API limit exceeded for {api_name}")
                     return False
-        logger.warning(f"No API limit found for {api_name}, allowing request")
         return True
     except Exception as e:
         logger.error(f"Error checking API limit for {api_name}: {e}")
         return True
 
-async def _get_cached_address_data(address: str, testnet: bool) -> Tuple[Optional[Dict[str, Any]], bool]:
+def validate_litecoin_address(address: str) -> bool:
     """
-    Получает кешированные данные адреса
-    Returns: (cached_data, from_cache)
+    Проверяет валидность Litecoin адреса
     """
-    async with _cache_lock:
-        cache_key = f"{address}_{testnet}"
-        if cache_key in _address_cache:
-            cached_data, timestamp = _address_cache[cache_key]
-            if time.time() - timestamp < CACHE_TTL:
-                logger.debug(f"Using cached data for address {address}")
-                return cached_data, True
-            else:
-                del _address_cache[cache_key]
-    return None, False
-
-async def _set_cached_address_data(address: str, testnet: bool, data: Dict[str, Any]):
-    """Сохраняет данные адреса в кеш"""
-    async with _cache_lock:
-        cache_key = f"{address}_{testnet}"
-        _address_cache[cache_key] = (data, time.time())
-        logger.debug(f"Cached data for address {address}")
+    if not address or not isinstance(address, str):
+        return False
+    
+    if len(address) < 26 or len(address) > 35:
+        return False
+    
+    # Проверка префиксов для основной сети и testnet
+    if TESTNET:
+        valid_prefixes = ['m', 'n', '2']
+    else:
+        valid_prefixes = ['L', 'M', '3']
+    
+    if not any(address.startswith(prefix) for prefix in valid_prefixes):
+        return False
+    
+    try:
+        # Base58 проверка для основных адресов
+        decoded = b58decode(address)
+        if len(decoded) != 25:
+            return False
+        
+        # Проверка checksum
+        checksum = decoded[-4:]
+        hash1 = hashlib.sha256(decoded[:-4]).digest()
+        hash2 = hashlib.sha256(hash1).digest()
+        
+        return hash2[:4] == checksum
+    except:
+        # Для bech32 адресов (начинающихся с ltc1)
+        if address.startswith('ltc1'):
+            # Упрощенная проверка bech32 адресов
+            return re.match(r'^ltc1[ac-hj-np-z02-9]{8,87}$', address) is not None
+        return False
 
 async def get_utxo_for_address(address: str, testnet: bool = False) -> List[Dict[str, Any]]:
     """
-    Получает список неизрасходованных выходов (UTXO) для адреса через litecoinspace.org API
-    Returns: Список UTXO
+    Получает список неизрасходованных выходов (UTXO) для адреса
     """
+    if not validate_litecoin_address(address):
+        logger.error(f"Invalid Litecoin address: {address}")
+        return []
+    
     if not await check_api_limit('litecoinspace'):
         return []
         
@@ -96,6 +154,7 @@ async def get_utxo_for_address(address: str, testnet: bool = False) -> List[Dict
                     for utxo in utxos:
                         utxo['confirmations'] = utxo.get('confirmations', 0)
                         utxo['is_confirmed'] = utxo['confirmations'] >= MIN_CONFIRMATIONS
+                        utxo['utxo_id'] = f"{utxo['txid']}:{utxo['vout']}"
                     
                     logger.info(f"Retrieved {len(utxos)} UTXOs for address {address}")
                     return utxos
@@ -106,27 +165,59 @@ async def get_utxo_for_address(address: str, testnet: bool = False) -> List[Dict
         logger.error(f"Error fetching UTXO for {address}: {e}")
         return []
 
-async def check_double_spend(address: str, utxos: List[Dict[str, Any]]) -> bool:
+async def verify_transaction_signature(txid: str, signature: str, public_key: str) -> bool:
     """
-    Проверяет, не были ли выходы уже использованы в других транзакциях
-    Returns: True если обнаружено двойное расходование
+    Проверяет цифровую подпись транзакции
     """
     try:
-        # Получаем актуальные UTXO с узла
+        # Получаем данные транзакции для верификации
+        tx_data = await get_transaction_details(txid)
+        if not tx_data:
+            return False
+        
+        # Создаем хеш транзакции для проверки
+        tx_hash = hashlib.sha256(json.dumps(tx_data, sort_keys=True).encode()).hexdigest()
+        
+        # Проверяем подпись с использованием ECDSA для Litecoin
+        try:
+            # Конвертируем публичный ключ и подпись
+            vk = ecdsa.VerifyingKey.from_string(bytes.fromhex(public_key), curve=ecdsa.SECP256k1)
+            return vk.verify(bytes.fromhex(signature), bytes.fromhex(tx_hash))
+        except:
+            # Альтернативная проверка с RSA (для разных форматов)
+            try:
+                key = RSA.import_key(public_key)
+                h = SHA256.new(tx_hash.encode())
+                pkcs1_15.new(key).verify(h, bytes.fromhex(signature))
+                return True
+            except (ValueError, TypeError):
+                logger.error("Signature verification failed")
+                return False
+                
+    except Exception as e:
+        logger.error(f"Error verifying signature for transaction {txid}: {e}")
+        return False
+
+async def check_double_spend(address: str, utxos: List[Dict[str, Any]]) -> bool:
+    """
+    Проверяет двойное расходование UTXO
+    """
+    try:
+        # Получаем актуальные UTXO
         current_utxos = await get_utxo_for_address(address)
-        current_utxo_ids = {f"{utxo['txid']}:{utxo['vout']}" for utxo in current_utxos}
+        current_utxo_ids = {utxo['utxo_id'] for utxo in current_utxos if 'utxo_id' in utxo}
         
         # Проверяем, все ли наши UTXO еще действительны
         for utxo in utxos:
-            utxo_id = f"{utxo['txid']}:{utxo['vout']}"
+            utxo_id = utxo.get('utxo_id', f"{utxo['txid']}:{utxo['vout']}")
             if utxo_id not in current_utxo_ids:
                 logger.warning(f"Double spend detected for UTXO {utxo_id}")
-                return True  # Обнаружено двойное расходование
+                return True
                 
         return False
     except Exception as e:
         logger.error(f"Error checking double spend for {address}: {e}")
-        return True  # В случае ошибки считаем, что есть риск
+        return True
 
 def is_transaction_confirmed(tx_data: Dict[str, Any], min_confirmations: int = MIN_CONFIRMATIONS) -> bool:
     """
@@ -135,31 +226,56 @@ def is_transaction_confirmed(tx_data: Dict[str, Any], min_confirmations: int = M
     confirmations = tx_data.get('confirmations', 0)
     return confirmations >= min_confirmations
 
-async def check_transaction_litecoinspace_api(address: str, expected_amount: float, testnet: bool = False) -> Optional[Dict[str, Any]]:
+async def get_transaction_details(txid: str, testnet: bool = False) -> Optional[Dict[str, Any]]:
     """
-    Получает данные по адресу через официальный API litecoinspace.org
-    Возвращает словарь с полями: balance, received, transaction_count, confirmed_balance, unconfirmed_balance
+    Получает детальную информацию о транзакции
     """
-    if not await check_api_limit('litecoinspace'):
-        return None
-        
     if testnet:
         logger.warning("Litecoinspace.org does not support testnet")
         return None
-
+    
     try:
-        # Получаем UTXO для точного расчета баланса
+        async with aiohttp.ClientSession() as session:
+            url = f"https://litecoinspace.org/api/tx/{txid}"
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
+                if response.status == 200:
+                    tx_data = await response.json()
+                    
+                    # Добавляем дополнительную информацию
+                    confirmations = tx_data.get('confirmations', 0)
+                    tx_data['is_confirmed'] = confirmations >= MIN_CONFIRMATIONS
+                    tx_data['is_secure'] = confirmations >= 12  # Более строгая проверка
+                    
+                    return tx_data
+                else:
+                    logger.warning(f"Litecoinspace transaction API returned status {response.status}")
+                    return None
+    except Exception as e:
+        logger.error(f"Error fetching transaction details for {txid}: {e}")
+        return None
+
+async def check_transaction_utxo_model(address: str, expected_amount: float, testnet: bool = False) -> Optional[Dict[str, Any]]:
+    """
+    Проверяет транзакции с использованием UTXO-модели
+    """
+    if not validate_litecoin_address(address):
+        logger.error(f"Invalid Litecoin address: {address}")
+        return None
+    
+    try:
+        # Получаем текущие UTXO
         utxos = await get_utxo_for_address(address, testnet)
         
         # Проверяем на двойное расходование
         if await check_double_spend(address, utxos):
-            logger.warning(f"Double spend detected for address {address}")
-            return None
+            raise DoubleSpendError(f"Double spend detected for address {address}")
 
         # Вычисляем балансы на основе UTXO
         total_balance = 0.0
         confirmed_balance = 0.0
         unconfirmed_balance = 0.0
+        confirmed_utxos = []
+        unconfirmed_utxos = []
         
         for utxo in utxos:
             amount = utxo.get('value', 0)
@@ -167,10 +283,12 @@ async def check_transaction_litecoinspace_api(address: str, expected_amount: flo
             
             if is_transaction_confirmed(utxo):
                 confirmed_balance += amount
+                confirmed_utxos.append(utxo)
             else:
                 unconfirmed_balance += amount
+                unconfirmed_utxos.append(utxo)
         
-        # Получаем общую информацию об адресе для дополнительных данных
+        # Получаем информацию об адресе для дополнительных данных
         async with aiohttp.ClientSession() as session:
             url = f"https://litecoinspace.org/api/address/{address}"
             async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
@@ -183,137 +301,379 @@ async def check_transaction_litecoinspace_api(address: str, expected_amount: flo
                         'transaction_count': address_info.get('chain_stats', {}).get('tx_count', 0),
                         'confirmed_balance': confirmed_balance,
                         'unconfirmed_balance': unconfirmed_balance,
+                        'confirmed_utxos': confirmed_utxos,
+                        'unconfirmed_utxos': unconfirmed_utxos,
                         'utxo_count': len(utxos),
-                        'source': 'litecoinspace_api',
+                        'source': 'utxo_model',
                         'last_updated': time.time()
                     }
                 else:
-                    logger.warning(f"Litecoinspace address API returned status {response.status}")
                     return None
                     
     except Exception as e:
-        logger.error(f"Litecoinspace API error: {e}")
+        logger.error(f"UTXO model check error: {e}")
         return None
 
-async def check_transaction_litecoinspace_html(address: str, expected_amount: float, testnet: bool = False) -> Optional[Dict[str, Any]]:
+async def verify_transaction_complete(txid: str, expected_amount: float, address: str, 
+                                    signature: Optional[str] = None, public_key: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
     """
-    Получает данные по адресу с litecoinspace.org (парсит публичную страницу)
-    Используется как fallback, если API не работает
+    Полная проверка транзакции с верификацией подписи и подтверждений
     """
-    if testnet:
-        logger.warning("Litecoinspace.org does not support testnet")
-        return None
-
     try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://litecoinspace.org/address/{address}"
-            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    
-                    # Используем BeautifulSoup для парсинга HTML
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    # Ищем элементы с данными
-                    balance_element = soup.find('span', {'class': 'final-balance'})
-                    received_element = soup.find('span', {'class': 'total-received'})
-                    txs_element = soup.find('span', {'class': 'transaction-count'})
-                    
-                    # Альтернативный поиск, если классы изменились
-                    if not balance_element:
-                        balance_td = soup.find('td', text=re.compile(r'Final Balance', re.IGNORECASE))
-                        balance_element = balance_td.find_next_sibling('td') if balance_td else None
-                    if not received_element:
-                        received_td = soup.find('td', text=re.compile(r'Total Received', re.IGNORECASE))
-                        received_element = received_td.find_next_sibling('td') if received_td else None
-                    if not txs_element:
-                        txs_td = soup.find('td', text=re.compile(r'No\. Transactions', re.IGNORECASE))
-                        txs_element = txs_td.find_next_sibling('td') if txs_td else None
-                    
-                    balance = 0.0
-                    received = 0.0
-                    txs_count = 0
-                    
-                    if balance_element:
-                        balance_text = balance_element.get_text().strip().replace('LTC', '').strip()
-                        try:
-                            balance = float(balance_text) if balance_text else 0.0
-                        except ValueError:
-                            balance = 0.0
-                    
-                    if received_element:
-                        received_text = received_element.get_text().strip().replace('LTC', '').strip()
-                        try:
-                            received = float(received_text) if received_text else 0.0
-                        except ValueError:
-                            received = 0.0
-                    
-                    if txs_element:
-                        txs_text = txs_element.get_text().strip()
-                        try:
-                            txs_count = int(txs_text) if txs_text.isdigit() else 0
-                        except ValueError:
-                            txs_count = 0
-                    
-                    return {
-                        'balance': balance,
-                        'received': received,
-                        'transaction_count': txs_count,
-                        'confirmed_balance': balance,  # HTML не разделяет подтвержденные/неподтвержденные
-                        'unconfirmed_balance': 0.0,
-                        'source': 'litecoinspace_html',
-                        'last_updated': time.time()
-                    }
-                else:
-                    logger.error(f"Litecoinspace.org returned status {response.status}")
+        # Получаем детали транзакции
+        tx_data = await get_transaction_details(txid)
+        if not tx_data:
+            return False, {'error': 'Transaction not found'}
+        
+        # Проверяем подтверждения
+        if not is_transaction_confirmed(tx_data):
+            return False, {'error': 'Insufficient confirmations', 'confirmations': tx_data.get('confirmations', 0)}
+        
+        # Проверяем подпись если предоставлены данные
+        if signature and public_key:
+            if not await verify_transaction_signature(txid, signature, public_key):
+                raise InvalidSignatureError(f"Invalid signature for transaction {txid}")
+        
+        # Проверяем что транзакция действительно отправлена на нужный адрес
+        vout_values = []
+        for vout in tx_data.get('vout', []):
+            if 'scriptPubKey' in vout and 'addresses' in vout['scriptPubKey']:
+                if address in vout['scriptPubKey']['addresses']:
+                    vout_values.append(vout.get('value', 0))
+        
+        total_received = sum(vout_values)
+        
+        # Проверяем что полученная сумма соответствует ожидаемой
+        if total_received < expected_amount:
+            return False, {
+                'error': 'Insufficient amount received',
+                'received': total_received,
+                'expected': expected_amount
+            }
+        
+        return True, {
+            'txid': txid,
+            'confirmations': tx_data.get('confirmations', 0),
+            'amount_received': total_received,
+            'block_height': tx_data.get('block_height'),
+            'timestamp': tx_data.get('timestamp'),
+            'is_confirmed': tx_data.get('is_confirmed', False),
+            'is_secure': tx_data.get('is_secure', False)
+        }
+        
     except Exception as e:
-        logger.error(f"Litecoinspace.org HTML parsing error: {e}")
-    return None
+        logger.error(f"Complete transaction verification failed: {e}")
+        return False, {'error': str(e)}
 
-async def check_ltc_transaction(address: str, expected_amount: float, testnet: bool = False) -> Tuple[bool, float]:
+async def check_ltc_transaction(address: str, expected_amount: float, testnet: bool = False) -> Tuple[bool, float, Dict[str, Any]]:
     """
     Основная функция проверки транзакции с использованием UTXO-модели
-    Возвращает кортеж (найдена_ли_транзакция, текущий_баланс)
     """
     try:
-        # Получаем актуальные данные без использования кеша для критически важных проверок
-        api_data = await check_transaction_litecoinspace_api(address, expected_amount, testnet)
+        # Используем UTXO-модель для проверки
+        utxo_data = await check_transaction_utxo_model(address, expected_amount, testnet)
         
-        if api_data is not None:
-            confirmed_balance = api_data.get('confirmed_balance', 0)
-            unconfirmed_balance = api_data.get('unconfirmed_balance', 0)
-            total_balance = confirmed_balance + unconfirmed_balance
-            
-            # Проверяем, достаточно ли подтвержденных средств
-            if confirmed_balance >= expected_amount:
-                logger.info(f"Sufficient confirmed balance: {confirmed_balance} >= {expected_amount}")
-                await _set_cached_address_data(address, testnet, api_data)
-                return True, total_balance
-            
-            # Если неподтвержденных средств достаточно, но подтвержденных нет
-            if total_balance >= expected_amount:
-                logger.info(f"Unconfirmed transaction found: {api_data}")
-                await _set_cached_address_data(address, testnet, api_data)
-                return False, total_balance
-
-        # Если API не сработал, пробуем парсинг HTML
-        html_data = await check_transaction_litecoinspace_html(address, expected_amount, testnet)
-        if html_data is not None:
-            total_balance = html_data.get('balance', 0)
-            
-            if total_balance >= expected_amount:
-                logger.info(f"Transaction found via Litecoinspace HTML: {html_data}")
-                await _set_cached_address_data(address, testnet, html_data)
-                return True, total_balance
-            
-        logger.info(f"No transaction found with expected amount. Current balance: {total_balance if 'total_balance' in locals() else 0}")
-        return False, total_balance if 'total_balance' in locals() else 0
+        if utxo_data is None:
+            return False, 0.0, {}
+        
+        confirmed_balance = utxo_data.get('confirmed_balance', 0)
+        unconfirmed_balance = utxo_data.get('unconfirmed_balance', 0)
+        total_balance = confirmed_balance + unconfirmed_balance
+        
+        # Проверяем только подтвержденные средства
+        if confirmed_balance >= expected_amount:
+            logger.info(f"Sufficient confirmed balance: {confirmed_balance} >= {expected_amount}")
+            return True, total_balance, utxo_data
+        
+        # Логируем информацию о неподтвержденных средствах
+        if unconfirmed_balance > 0:
+            logger.info(f"Unconfirmed balance detected: {unconfirmed_balance}. Waiting for confirmations...")
+        
+        logger.info(f"Insufficient confirmed balance: {confirmed_balance} < {expected_amount}")
+        return False, total_balance, utxo_data
+        
     except Exception as e:
         logger.error(f"Error checking LTC transaction: {e}")
-    
-    logger.info("No transaction found with expected amount")
-    return False, 0
+        return False, 0.0, {}
 
+async def validate_address_balance(address: str, expected_amount: float, 
+                                 require_confirmations: bool = True) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Валидация баланса адреса с учетом подтверждений
+    """
+    try:
+        # Получаем данные через UTXO-модель
+        utxo_data = await check_transaction_utxo_model(address, expected_amount)
+        if not utxo_data:
+            return False, {'error': 'Failed to retrieve UTXO data'}
+        
+        confirmed_balance = utxo_data.get('confirmed_balance', 0)
+        unconfirmed_balance = utxo_data.get('unconfirmed_balance', 0)
+        
+        if require_confirmations:
+            # Только подтвержденные средства
+            if confirmed_balance >= expected_amount:
+                return True, {
+                    'balance': confirmed_balance,
+                    'unconfirmed': unconfirmed_balance,
+                    'status': 'confirmed',
+                    'utxo_count': utxo_data.get('utxo_count', 0)
+                }
+            else:
+                return False, {
+                    'balance': confirmed_balance,
+                    'unconfirmed': unconfirmed_balance,
+                    'status': 'insufficient_confirmed',
+                    'utxo_count': utxo_data.get('utxo_count', 0)
+                }
+        else:
+            # Все средства (подтвержденные + неподтвержденные)
+            total_balance = confirmed_balance + unconfirmed_balance
+            if total_balance >= expected_amount:
+                return True, {
+                    'balance': total_balance,
+                    'confirmed': confirmed_balance,
+                    'unconfirmed': unconfirmed_balance,
+                    'status': 'unconfirmed' if unconfirmed_balance > 0 else 'confirmed',
+                    'utxo_count': utxo_data.get('utxo_count', 0)
+                }
+            else:
+                return False, {
+                    'balance': total_balance,
+                    'confirmed': confirmed_balance,
+                    'unconfirmed': unconfirmed_balance,
+                    'status': 'insufficient',
+                    'utxo_count': utxo_data.get('utxo_count', 0)
+                }
+                
+    except Exception as e:
+        logger.error(f"Address balance validation failed: {e}")
+        return False, {'error': str(e)}
+
+# Дополнительные функции для работы с UTXO
+async def get_address_utxos(address: str, confirmed_only: bool = True) -> List[Dict[str, Any]]:
+    """
+    Возвращает UTXO адреса с фильтрацией по подтверждениям
+    """
+    utxos = await get_utxo_for_address(address)
+    if confirmed_only:
+        return [utxo for utxo in utxos if is_transaction_confirmed(utxo)]
+    return utxos
+
+async def calculate_secure_balance(address: str) -> Dict[str, float]:
+    """
+    Вычисляет безопасный баланс с учетом различных уровней подтверждений
+    """
+    utxos = await get_utxo_for_address(address)
+    
+    balance = {
+        'total': 0.0,
+        'confirmed': 0.0,  # ≥ 6 подтверждений
+        'high_confidence': 0.0,  # ≥ 12 подтверждений
+        'unconfirmed': 0.0  # < 6 подтверждений
+    }
+    
+    for utxo in utxos:
+        amount = utxo.get('value', 0)
+        confirmations = utxo.get('confirmations', 0)
+        
+        balance['total'] += amount
+        
+        if confirmations >= 12:
+            balance['high_confidence'] += amount
+            balance['confirmed'] += amount
+        elif confirmations >= 6:
+            balance['confirmed'] += amount
+        else:
+            balance['unconfirmed'] += amount
+    
+    return balance
+
+# Обновленная функция проверки транзакции с поддержкой подписей
+async def check_transaction_with_signature(address: str, expected_amount: float, 
+                                         txid: Optional[str] = None,
+                                         signature: Optional[str] = None,
+                                         public_key: Optional[str] = None,
+                                         testnet: bool = False) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Проверяет транзакцию с поддержкой верификации подписи
+    """
+    # Если есть txid, проверяем конкретную транзакцию
+    if txid:
+        return await verify_transaction_complete(txid, expected_amount, address, signature, public_key)
+    
+    # Иначе проверяем баланс адреса
+    success, details = await validate_address_balance(address, expected_amount, require_confirmations=True)
+    
+    if success:
+        return True, {
+            'status': 'confirmed',
+            'balance': details['balance'],
+            'message': 'Sufficient confirmed balance'
+        }
+    else:
+        return False, {
+            'status': details['status'],
+            'balance': details['balance'],
+            'confirmed_balance': details.get('confirmed', 0),
+            'unconfirmed_balance': details.get('unconfirmed', 0),
+            'message': 'Insufficient balance' if details['status'] == 'insufficient' else 'Waiting for confirmations'
+        }
+
+# Мемпул мониторинг
+async def get_mempool_transactions() -> List[Dict[str, Any]]:
+    """
+    Получает текущие транзакции из мемпула
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = "https://litecoinspace.org/api/mempool"
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
+                if response.status == 200:
+                    mempool_data = await response.json()
+                    return mempool_data.get('transactions', [])
+                else:
+                    logger.warning(f"Mempool API returned status {response.status}")
+                    return []
+    except Exception as e:
+        logger.error(f"Error fetching mempool transactions: {e}")
+        return []
+
+async def monitor_mempool():
+    """
+    Мониторинг мемпула на предмет транзакций, связанных с отслеживаемыми адресами
+    """
+    global _mempool_transactions
+    
+    while True:
+        try:
+            # Получаем текущие транзакции из мемпула
+            mempool_txs = await get_mempool_transactions()
+            
+            async with _mempool_lock:
+                # Обновляем мемпул
+                current_time = time.time()
+                new_mempool = {}
+                
+                for tx in mempool_txs:
+                    txid = tx.get('txid')
+                    if not txid:
+                        continue
+                    
+                    # Сохраняем время обнаружения транзакции
+                    tx['first_seen'] = current_time
+                    new_mempool[txid] = tx
+                
+                # Обновляем глобальный мемпул
+                _mempool_transactions = new_mempool
+                
+                # Проверяем транзакции на соответствие отслеживаемым адресам
+                for address in _tracked_addresses:
+                    for txid, tx in _mempool_transactions.items():
+                        # Проверяем, связана ли транзакция с адресом
+                        if await is_transaction_related_to_address(tx, address):
+                            logger.info(f"Mempool transaction {txid} related to tracked address {address}")
+                            # Здесь можно добавить логику уведомления
+                
+                logger.debug(f"Mempool updated: {len(_mempool_transactions)} transactions")
+            
+            # Ждем перед следующей проверкой
+            await asyncio.sleep(MEMPOOL_UPDATE_INTERVAL)
+            
+        except Exception as e:
+            logger.error(f"Mempool monitoring error: {e}")
+            await asyncio.sleep(MEMPOOL_UPDATE_INTERVAL)
+
+async def is_transaction_related_to_address(tx: Dict[str, Any], address: str) -> bool:
+    """
+    Проверяет, связана ли транзакция с указанным адресом
+    """
+    try:
+        # Проверяем выходы транзакции
+        for vout in tx.get('vout', []):
+            if 'scriptPubKey' in vout and 'addresses' in vout['scriptPubKey']:
+                if address in vout['scriptPubKey']['addresses']:
+                    return True
+        
+        # Проверяем входы транзакции (для исходящих транзакций)
+        for vin in tx.get('vin', []):
+            if 'prevout' in vin and 'scriptPubKey' in vin['prevout']:
+                if address in vin['prevout']['scriptPubKey'].get('addresses', []):
+                    return True
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error checking transaction relation: {e}")
+        return False
+
+async def get_mempool_transactions_for_address(address: str) -> List[Dict[str, Any]]:
+    """
+    Возвращает транзакции из мемпула, связанные с указанным адресом
+    """
+    related_transactions = []
+    
+    async with _mempool_lock:
+        for txid, tx in _mempool_transactions.items():
+            if await is_transaction_related_to_address(tx, address):
+                related_transactions.append(tx)
+    
+    return related_transactions
+
+async def cleanup_old_mempool_transactions():
+    """
+    Очищает старые транзакции из мемпула
+    """
+    global _mempool_transactions
+    
+    while True:
+        try:
+            async with _mempool_lock:
+                current_time = time.time()
+                old_transactions = []
+                
+                # Находим транзакции, которые находятся в мемпуле слишком долго
+                for txid, tx in _mempool_transactions.items():
+                    first_seen = tx.get('first_seen', 0)
+                    if current_time - first_seen > 3600:  # 1 час
+                        old_transactions.append(txid)
+                
+                # Удаляем старые транзакции
+                for txid in old_transactions:
+                    del _mempool_transactions[txid]
+                
+                if old_transactions:
+                    logger.info(f"Cleaned up {len(old_transactions)} old mempool transactions")
+            
+            # Ждем перед следующей очисткой
+            await asyncio.sleep(MEMPOOL_CLEANUP_INTERVAL)
+            
+        except Exception as e:
+            logger.error(f"Mempool cleanup error: {e}")
+            await asyncio.sleep(MEMPOOL_CLEANUP_INTERVAL)
+
+async def start_mempool_monitoring():
+    """
+    Запускает мониторинг мемпула
+    """
+    global _mempool_task
+    
+    if _mempool_task is None:
+        _mempool_task = asyncio.create_task(monitor_mempool())
+        asyncio.create_task(cleanup_old_mempool_transactions())
+        logger.info("Mempool monitoring started")
+
+async def stop_mempool_monitoring():
+    """
+    Останавливает мониторинг мемпула
+    """
+    global _mempool_task
+    
+    if _mempool_task:
+        _mempool_task.cancel()
+        _mempool_task = None
+        logger.info("Mempool monitoring stopped")
+
+# Инициализация WebSocket
 async def init_websocket():
     """Инициализация WebSocket соединения с litecoinspace.org"""
     global _websocket
@@ -336,6 +696,9 @@ async def init_websocket():
                 
                 # Запускаем обработчик сообщений
                 asyncio.create_task(_websocket_message_handler())
+                
+                # Запускаем мониторинг мемпула
+                await start_mempool_monitoring()
                 
             except Exception as e:
                 logger.error(f"Failed to establish WebSocket connection: {e}")
@@ -410,6 +773,9 @@ async def untrack_address(address: str):
             logger.info(f"Stopped tracking address: {address}")
     except Exception as e:
         logger.error(f"Failed to untrack address {address}: {e}")
+
+# Остальные функции (get_difficulty_adjustment, get_binance_ltc_rate, etc.) остаются без изменений
+# ... [остальной код без изменений]
 
 async def get_difficulty_adjustment() -> Optional[Dict[str, Any]]:
     """Получает информацию о корректировке сложности сети"""
@@ -601,15 +967,26 @@ async def cleanup_cache():
     """Очистка устаревших записей в кеше"""
     async with _cache_lock:
         current_time = time.time()
+        
+        # Очищаем кеш адресов
         keys_to_delete = []
         for key, (data, timestamp) in _address_cache.items():
             if current_time - timestamp > CACHE_TTL:
                 keys_to_delete.append(key)
         for key in keys_to_delete:
             del _address_cache[key]
-            logger.debug(f"Removed expired cache entry for key: {key}")
+            logger.debug(f"Removed expired address cache entry: {key}")
         
-        # Также очищаем кеш курсов
+        # Очищаем кеш UTXO
+        utxo_keys_to_delete = []
+        for key, (data, timestamp) in _utxo_cache.items():
+            if current_time - timestamp > CACHE_TTL // 2:
+                utxo_keys_to_delete.append(key)
+        for key in utxo_keys_to_delete:
+            del _utxo_cache[key]
+            logger.debug(f"Removed expired UTXO cache entry: {key}")
+        
+        # Очищаем кеш курсов
         rate_keys_to_delete = []
         for key, (rate, timestamp) in _rate_cache.items():
             if current_time - timestamp > RATE_CACHE_TTL:
@@ -617,15 +994,17 @@ async def cleanup_cache():
         
         for key in rate_keys_to_delete:
             del _rate_cache[key]
-            logger.debug(f"Removed expired rate cache entry for key: {key}")
+            logger.debug(f"Removed expired rate cache entry: {key}")
 
 def get_key_usage_stats() -> Dict[str, Any]:
-    """Минимальная статистика"""
+    """Статистика использования системы"""
     return {
         "cache_size": len(_address_cache),
+        "utxo_cache_size": len(_utxo_cache),
         "rate_cache_size": len(_rate_cache),
         "websocket_connected": _websocket is not None and not _websocket.closed,
-        "tracked_addresses_count": len(_tracked_addresses)
+        "tracked_addresses_count": len(_tracked_addresses),
+        "mempool_transactions_count": len(_mempool_transactions)
     }
 
 async def check_websocket_health() -> bool:
@@ -659,3 +1038,12 @@ async def reconnect_websocket():
             _websocket = None
     
     await init_websocket()
+
+# Инициализация при импорте
+async def initialize():
+    """Инициализация системы"""
+    await init_websocket()
+    await start_mempool_monitoring()
+
+# Запуск инициализации при импорте
+asyncio.create_task(initialize())

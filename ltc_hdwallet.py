@@ -14,9 +14,7 @@ from bip_utils import (
     Bip39WordsNum,
     Bip84,  # BIP84 вместо BIP44
     Bip84Coins,  # BIP84 монеты
-    Bip44Changes,  # Для BIP84 используем Bip44Changes
-    LtcAddrDecoder,  # Для валидации адресов
-    LtcAddrEncoder
+    Bip44Changes  # Для BIP84 используем Bip44Changes
 )
 
 # Попытаемся импортировать дополнительные библиотеки безопасности
@@ -313,26 +311,21 @@ class LTCWallet:
         """
         Валидация адреса Litecoin.
         Поддерживает адреса форматов:
-        - P2PKH (начинаются с 'L')
-        - P2SH (начинаются с 'M')
-        - Bech32 (начинаются с 'ltc1')
+        - Bech32 (начинаются с 'ltc1') - BIP84
+        - P2PKH (начинаются с 'L') - Legacy
+        - P2SH (начинаются с 'M') - Legacy
         """
-        try:
-            # Проверка Bech32 адресов (начинаются с ltc1)
-            if address.startswith('ltc1'):
-                # Декодируем и снова кодируем для проверки
-                decoded = LtcAddrDecoder.Decode(address)
-                encoded = LtcAddrEncoder.Encode(decoded)
-                return encoded == address
-            
-            # Проверка Legacy адресов (начинаются с L или M)
-            elif address.startswith('L') or address.startswith('M'):
-                # Для Legacy адресов используем простую проверку формата
-                return len(address) >= 26 and len(address) <= 34 and all(c in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz' for c in address)
-            
-            return False
-        except:
-            return False
+        # Проверка Bech32 адресов (начинаются с ltc1)
+        if address.startswith('ltc1'):
+            # Bech32 адреса обычно имеют длину около 42 символов
+            return 40 <= len(address) <= 62
+        
+        # Проверка Legacy адресов (начинаются с L или M)
+        elif address.startswith('L') or address.startswith('M'):
+            # Legacy адреса обычно имеют длину 26-35 символов
+            return 26 <= len(address) <= 35
+        
+        return False
 
     def get_qr_code(self, address: str, amount: float = None) -> str:
         """Генерация QR-кода для адреса"""

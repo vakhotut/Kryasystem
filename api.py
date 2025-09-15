@@ -13,19 +13,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Глобальные настройки таймаутов
 ELECTRUM_CONNECT_TIMEOUT = 15.0
 ELECTRUM_REQUEST_TIMEOUT = 10.0
 API_REQUEST_TIMEOUT = 10.0
 
-# API ключи для ротации
 NOWNODES_API_KEYS = os.getenv('NOWNODES_API_KEYS', '').split(',')
 BLOCKCYPHER_API_KEYS = os.getenv('BLOCKCYPHER_API_KEYS', '').split(',')
 BLOCKCHAIR_API_KEY = os.getenv('BLOCKCHAIR_API_KEY', '')
 COINGECKO_API_KEY = os.getenv('COINGECKO_API_KEY', '')
 TESTNET = os.getenv('TESTNET', 'False').lower() == 'true'
 
-# Electrum LTC серверы (mainnet и testnet) - обновленный список
 ELECTRUM_SERVERS_MAINNET = [
     "electrum-ltc.bysh.me:50002",
     "electrum.ltc.xurious.com:50002",
@@ -40,24 +37,20 @@ ELECTRUM_SERVERS_TESTNET = [
     "testnet.ltc.rentonisk.com:51002"
 ]
 
-# Убедимся, что пустые ключи отфильтрованы
 NOWNODES_API_KEYS = [key.strip() for key in NOWNODES_API_KEYS if key.strip()]
 BLOCKCYPHER_API_KEYS = [key.strip() for key in BLOCKCYPHER_API_KEYS if key.strip()]
 
-# Кеш для хранения результатов проверки адресов и курсов
 _address_cache = {}
 _rate_cache = {}
 _cache_lock = asyncio.Lock()
 CACHE_TTL = 60  # Время жизни кеша в секундах (1 минута)
 RATE_CACHE_TTL = 30  # Время жизни кеша курсов в секундах
 
-# Счетчики для ротации ключей
 _nownodes_key_index = 0
 _blockcypher_key_index = 0
 _electrum_server_index = 0
 _key_rotation_lock = asyncio.Lock()
 
-# Импортируем функции для работы с API лимитами
 from db import increment_api_request, get_api_limits
 
 class ElectrumClient:
@@ -79,7 +72,6 @@ class ElectrumClient:
             logger.error("No Electrum servers configured")
             return False
         
-        # Пробуем подключиться к разным серверам
         for attempt in range(len(self.servers)):
             async with _key_rotation_lock:
                 server = self.servers[_electrum_server_index]
@@ -87,14 +79,12 @@ class ElectrumClient:
             
             try:
                 host, port = server.split(':')
-                # Увеличиваем таймаут подключения
                 self.reader, self.writer = await asyncio.wait_for(
                     asyncio.open_connection(host, int(port)),
                     timeout=ELECTRUM_CONNECT_TIMEOUT
                 )
                 self.current_server = server
                 
-                # Увеличиваем таймаут для версионного запроса
                 version_response = await asyncio.wait_for(
                     self._request("server.version", ["electrum-ltc-client", "1.4"]),
                     timeout=ELECTRUM_REQUEST_TIMEOUT
@@ -107,7 +97,6 @@ class ElectrumClient:
             except Exception as e:
                 logger.warning(f"Failed to connect to Electrum server {server}: {e}")
             
-            # Ждем перед следующей попыткой
             await asyncio.sleep(1)
         
         logger.error("All Electrum servers failed to connect")
@@ -128,11 +117,9 @@ class ElectrumClient:
                     "params": params
                 }
                 
-                # Отправляем запрос
                 self.writer.write((json.dumps(request) + '\n').encode())
                 await self.writer.drain()
                 
-                # Читаем ответ
                 response_data = await asyncio.wait_for(
                     self.reader.readline(),
                     timeout=ELECTRUM_REQUEST_TIMEOUT
@@ -188,23 +175,16 @@ class ElectrumClient:
     async def _get_script_hash(self, address):
         """Получение script hash для адреса"""
         try:
-            # Для Electrum нам нужно преобразовать адрес в script hash
-            # Декодируем LTC адрес
             decoded = base58.b58decode_check(address)
             
-            # Определяем версионный байт
             version_byte = decoded[0]
             
-            # Берем хэш от публичного ключа (опускаем версионный байт)
             pubkey_hash = decoded[1:]
             
-            # Создаем скрипт P2PKH
             script = bytes([0x76, 0xa9, 0x14]) + pubkey_hash + bytes([0x88, 0xac])
             
-            # Вычисляем хэш скрипта
             script_hash = hashlib.sha256(script).digest()
             
-            # Electrum использует little-endian
             return script_hash[::-1].hex()
         except Exception as e:
             logger.error(f"Failed to get script hash for {address}: {e}")
@@ -228,7 +208,6 @@ async def check_api_limit(api_name):
                 else:
                     logger.warning(f"API limit exceeded for {api_name}")
                     return False
-        # Если лимит не найден, разрешаем запрос
         logger.warning(f"No API limit found for {api_name}, allowing request")
         return True
     except Exception as e:
@@ -254,7 +233,7 @@ async def check_transaction_electrum(address: str, amount: float, testnet: bool 
                 total_received = 0
                 
                 if history:
-                    # Для каждой подтвержденной транзакции получаем детали
+
                     for tx in history:
                         if tx.get('height', 0) > 0:  # Только подтвержденные транзакции
                             tx_details = await client.get_transaction(tx['tx_hash'])
@@ -413,7 +392,6 @@ async def get_ltc_usd_rate() -> float:
     rates = []
     sources = []
     
-    # Пробуем получить курс из разных источников
     coingecko_rate = await get_coingecko_ltc_rate('usd')
     if coingecko_rate:
         rates.append(coingecko_rate)
@@ -440,11 +418,9 @@ async def get_ltc_usd_rate() -> float:
         sources.append('Tsanghi')
     
     if rates:
-        # Вычисляем среднее значение из доступных курсов
         average_rate = sum(rates) / len(rates)
         logger.info(f"LTC rate obtained from {len(sources)} sources: {sources}. Average: ${average_rate:.2f}")
         
-        # Сохраняем в кеш
         await set_cached_rate(average_rate)
         return average_rate
     else:
@@ -616,7 +592,6 @@ async def _set_cached_address_data(address: str, testnet: bool, data: Dict[str, 
         _address_cache[cache_key] = (data, time.time())
         logger.debug(f"Cached data for address {address}")
 
-# Новая функция для приоритетной проверки через Electrum с таймаутом
 async def prioritized_transaction_check(address: str, expected_amount: float, testnet: bool = TESTNET, timeout: int = 1200) -> bool:
     """
     Проверка LTC транзакции с приоритетом Electrum и таймаутом 20 минут
@@ -624,7 +599,6 @@ async def prioritized_transaction_check(address: str, expected_amount: float, te
     """
     start_time = time.time()
     
-    # Сначала проверяем через Electrum
     logger.info(f"Starting Electrum check for address {address}, expected amount: {expected_amount}")
     electrum_data = await check_transaction_electrum(address, expected_amount, testnet)
     
@@ -633,13 +607,11 @@ async def prioritized_transaction_check(address: str, expected_amount: float, te
         await _set_cached_address_data(address, testnet, electrum_data)
         return True
     
-    # Ждем либо до тайм-аута, либо до появления транзакции
     while time.time() - start_time < timeout:
         elapsed_time = time.time() - start_time
         remaining_time = timeout - elapsed_time
         logger.info(f"Transaction not found yet. Elapsed: {elapsed_time:.0f}s, remaining: {remaining_time:.0f}s")
         
-        # Проверяем каждую минуту
         await asyncio.sleep(60)
         
         electrum_data = await check_transaction_electrum(address, expected_amount, testnet)
@@ -648,7 +620,6 @@ async def prioritized_transaction_check(address: str, expected_amount: float, te
             await _set_cached_address_data(address, testnet, electrum_data)
             return True
     
-    # Если прошло 20 минут и транзакция не найдена, используем другие сервисы
     logger.info(f"Electrum timeout reached after {timeout}s, checking other providers for address {address}")
     
     providers = [
@@ -704,7 +675,6 @@ async def check_ltc_transaction(address: str, expected_amount: float, testnet: b
     logger.info("No transaction found with expected amount")
     return False
 
-# Функция для очистки устаревших записей в кеше (можно запускать периодически)
 async def cleanup_cache():
     """Очистка устаревших записей в кеше"""
     async with _cache_lock:
@@ -729,7 +699,6 @@ async def cleanup_cache():
             del _rate_cache[key]
             logger.debug(f"Removed expired rate cache entry for key: {key}")
 
-# Функция для получения статистики использования ключей
 def get_key_usage_stats() -> Dict[str, Any]:
     """Получение статистики использования API ключей"""
     return {
@@ -744,7 +713,6 @@ def get_key_usage_stats() -> Dict[str, Any]:
         "rate_cache_size": len(_rate_cache)
     }
 
-# Функция для проверки здоровья Electrum серверов
 async def check_electrum_servers_health():
     """Периодическая проверка здоровья Electrum серверов"""
     while True:
@@ -760,19 +728,16 @@ async def check_electrum_servers_health():
         
         await asyncio.sleep(300)  # Проверяем каждые 5 минут
 
-# Функция для немедленного перехода к другим провайдерам, если Electrum недоступен
 async def check_ltc_transaction_fallback(address: str, expected_amount: float, testnet: bool = TESTNET) -> bool:
     """
     Проверка LTC транзакции с немедленным переходом к другим провайдерам, если Electrum недоступен
     """
     try:
-        # Проверяем кеш перед обращением к API
         cached_data, from_cache = await _get_cached_address_data(address, testnet)
         if from_cache and cached_data and cached_data.get('received', 0) >= expected_amount:
             logger.info(f"Transaction found in cache for address {address}")
             return True
         
-        # Сначала пробуем Electrum
         try:
             electrum_data = await asyncio.wait_for(
                 check_transaction_electrum(address, expected_amount, testnet),
@@ -785,7 +750,6 @@ async def check_ltc_transaction_fallback(address: str, expected_amount: float, t
         except (asyncio.TimeoutError, Exception) as e:
             logger.warning(f"Electrum check failed, using fallback providers immediately: {e}")
         
-        # Если Electrum недоступен, сразу используем другие провайдеры
         providers = [
             ('blockchair', check_transaction_blockchair),
             ('sochain', check_transaction_sochain),

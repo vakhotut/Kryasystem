@@ -89,24 +89,37 @@ async def check_transaction_litecoinspace_api(address: str, expected_amount: flo
                     # Вычисляем общую полученную сумму
                     total_received = 0
                     confirmed_txs = 0
+                    current_balance = 0
                     
                     for tx in transactions:
-                        if tx.get('status', {}).get('confirmed', False):
+                        # Учитываем как подтвержденные, так и неподтвержденные транзакции
+                        is_confirmed = tx.get('status', {}).get('confirmed', False)
+                        if is_confirmed:
                             confirmed_txs += 1
-                            for vout in tx.get('vout', []):
-                                if 'scriptPubKey' in vout and 'addresses' in vout['scriptPubKey']:
-                                    if address in vout['scriptPubKey']['addresses']:
-                                        total_received += vout.get('value', 0)
+                            
+                        for vout in tx.get('vout', []):
+                            if 'scriptPubKey' in vout and 'addresses' in vout['scriptPubKey']:
+                                if address in vout['scriptPubKey']['addresses']:
+                                    amount = vout.get('value', 0)
+                                    total_received += amount
+                                    
+                                    # Если транзакция подтверждена, добавляем к балансу
+                                    if is_confirmed:
+                                        current_balance += amount
                     
-                    # Получаем информацию о difficulty adjustment для дополнительных данных
-                    difficulty_url = "https://litecoinspace.org/api/v1/difficulty-adjustment"
-                    async with session.get(difficulty_url, timeout=API_REQUEST_TIMEOUT) as diff_response:
-                        difficulty_data = await diff_response.json() if diff_response.status == 200 else {}
+                    # Для неподтвержденных транзакций проверяем vin
+                    for tx in transactions:
+                        if not tx.get('status', {}).get('confirmed', False):
+                            for vin in tx.get('vin', []):
+                                if 'prevout' in vin and 'scriptPubKey' in vin['prevout']:
+                                    if address in vin['prevout']['scriptPubKey'].get('addresses', []):
+                                        # Это исходящая транзакция, вычитаем из баланса
+                                        current_balance -= vin['prevout'].get('value', 0)
                     
                     return {
+                        'balance': current_balance,
                         'received': total_received,
                         'transaction_count': confirmed_txs,
-                        'difficulty_data': difficulty_data,
                         'source': 'litecoinspace_api'
                     }
                 else:
@@ -188,38 +201,61 @@ async def check_transaction_litecoinspace_html(address: str, expected_amount: fl
         logger.error(f"Litecoinspace.org HTML parsing error: {e}")
     return None
 
-async def check_ltc_transaction(address: str, expected_amount: float, testnet: bool = False) -> bool:
+async def check_ltc_transaction(address: str, expected_amount: float, testnet: bool = False) -> Tuple[bool, float]:
     """
     Основная функция проверки транзакции
-    Сначала пытается использовать API, затем fallback на парсинг HTML
+    Возвращает кортеж (найдена_ли_транзакция, текущий_баланс)
     """
     try:
         cached_data, from_cache = await _get_cached_address_data(address, testnet)
-        if from_cache and cached_data and cached_data.get('received', 0) >= expected_amount:
-            logger.info(f"Transaction found in cache for address {address}")
-            return True
+        if from_cache and cached_data:
+            current_balance = cached_data.get('balance', 0)
+            if current_balance >= expected_amount:
+                logger.info(f"Transaction found in cache for address {address}, balance: {current_balance}")
+                return True, current_balance
 
         # Сначала пробуем API
         api_data = await check_transaction_litecoinspace_api(address, expected_amount, testnet)
-        if api_data and api_data.get('received', 0) >= expected_amount:
-            logger.info(f"Transaction found via Litecoinspace API: {api_data}")
-            await _set_cached_address_data(address, testnet, api_data)
-            return True
-        
+        if api_data is not None:
+            current_balance = api_data.get('balance', 0)
+            total_received = api_data.get('received', 0)
+            
+            # Если текущий баланс достаточен
+            if current_balance >= expected_amount:
+                logger.info(f"Transaction found via Litecoinspace API: {api_data}")
+                await _set_cached_address_data(address, testnet, api_data)
+                return True, current_balance
+            
+            # Если общая полученная сумма достаточна, но баланс меньше (возможно, часть средств отправлена)
+            if total_received >= expected_amount:
+                logger.info(f"Total received amount sufficient: {total_received}, but current balance: {current_balance}")
+                # Возвращаем текущий баланс, чтобы бот мог решить, что делать
+                await _set_cached_address_data(address, testnet, api_data)
+                return False, current_balance
+
         # Если API не сработал или сумма недостаточна, пробуем парсинг HTML
         html_data = await check_transaction_litecoinspace_html(address, expected_amount, testnet)
-        if html_data and html_data.get('received', 0) >= expected_amount:
-            logger.info(f"Transaction found via Litecoinspace HTML: {html_data}")
-            await _set_cached_address_data(address, testnet, html_data)
-            return True
+        if html_data is not None:
+            current_balance = html_data.get('balance', 0)
+            total_received = html_data.get('received', 0)
             
-        logger.info("No transaction found with expected amount")
-        return False
+            if current_balance >= expected_amount:
+                logger.info(f"Transaction found via Litecoinspace HTML: {html_data}")
+                await _set_cached_address_data(address, testnet, html_data)
+                return True, current_balance
+                
+            if total_received >= expected_amount:
+                logger.info(f"Total received amount sufficient: {total_received}, but current balance: {current_balance}")
+                await _set_cached_address_data(address, testnet, html_data)
+                return False, current_balance
+            
+        logger.info(f"No transaction found with expected amount. Current balance: {current_balance if 'current_balance' in locals() else 0}")
+        return False, current_balance if 'current_balance' in locals() else 0
     except Exception as e:
         logger.error(f"Error checking LTC transaction: {e}")
     
     logger.info("No transaction found with expected amount")
-    return False
+    return False, 0
 
 async def init_websocket():
     """Инициализация WebSocket соединения с litecoinspace.org"""
@@ -530,4 +566,4 @@ def get_key_usage_stats() -> Dict[str, Any]:
         "rate_cache_size": len(_rate_cache),
         "websocket_connected": _websocket is not None and not _websocket.closed,
         "tracked_addresses_count": len(_tracked_addresses)
-                }
+        }

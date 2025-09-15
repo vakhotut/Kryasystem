@@ -530,7 +530,4 @@ def get_key_usage_stats() -> Dict[str, Any]:
         "rate_cache_size": len(_rate_cache),
         "websocket_connected": _websocket is not None and not _websocket.closed,
         "tracked_addresses_count": len(_tracked_addresses)
-    }
-
-# Инициализация WebSocket при импорте модуля
-asyncio.create_task(init_websocket())
+                }

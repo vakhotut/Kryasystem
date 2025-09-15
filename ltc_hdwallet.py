@@ -10,6 +10,8 @@ from bip_utils import (
     Bip39MnemonicGenerator, 
     Bip39MnemonicValidator,
     Bip39SeedGenerator,
+    Bip39WordsNum,
+    Bip39Languages,
     Bip44,
     Bip44Coins,
     Bip44Changes
@@ -139,7 +141,8 @@ class LTCWallet:
         default_config = {
             'coin_type': Bip44Coins.LITECOIN,
             'index_storage_path': 'wallet_state.json',
-            'max_addresses_per_second': 5
+            'max_addresses_per_second': 5,
+            'mnemonic_length': 12  # 12, 15, 18, 21 или 24 слова
         }
         
         try:
@@ -178,29 +181,88 @@ class LTCWallet:
 
     def _get_mnemonic(self) -> str:
         """Безопасное получение мнемонической фразы"""
+        # 1. Проверка переменной окружения
         mnemonic = os.getenv("LTC_MNEMONIC")
         if mnemonic:
+            logger.info("Using mnemonic from environment variable")
             return mnemonic
         
-        # Генерация новой мнемонической фразы
-        new_mnemonic = Bip39MnemonicGenerator().Generate()
-        logger.warning("Generated new mnemonic. Please securely store it in a safe place")
+        # 2. Проверка зашифрованного файла
+        mnemonic_path = self.config.get('mnemonic_backup_path', 'mnemonic_backup.enc')
+        if os.path.exists(mnemonic_path):
+            try:
+                if self.encryption_key and CRYPTO_AVAILABLE:
+                    with open(mnemonic_path, 'rb') as f:
+                        encrypted_mnemonic = f.read()
+                    cipher = Fernet(self.encryption_key)
+                    decrypted_mnemonic = cipher.decrypt(encrypted_mnemonic).decode()
+                    logger.info("Using mnemonic from encrypted backup file")
+                    return decrypted_mnemonic
+                else:
+                    with open(mnemonic_path, 'r') as f:
+                        stored_mnemonic = f.read().strip()
+                    logger.info("Using mnemonic from backup file")
+                    return stored_mnemonic
+            except Exception as e:
+                logger.error(f"Error reading mnemonic backup: {e}")
         
-        # Попытка безопасного сохранения
+        # 3. Генерация новой мнемонической фразы
         try:
-            mnemonic_path = self.config.get('mnemonic_backup_path', 'mnemonic_backup.enc')
-            if self.encryption_key and CRYPTO_AVAILABLE:
-                cipher = Fernet(self.encryption_key)
-                encrypted_mnemonic = cipher.encrypt(new_mnemonic.encode())
-                with open(mnemonic_path, 'wb') as f:
-                    f.write(encrypted_mnemonic)
-            else:
-                with open(mnemonic_path, 'w') as f:
-                    f.write(new_mnemonic)
+            # Определение длины мнемоники из конфига
+            words_num = self.config.get('mnemonic_length', 12)
+            
+            # Поддержка различных длин мнемонических фраз
+            words_num_map = {
+                12: Bip39WordsNum.WORDS_NUM_12,
+                15: Bip39WordsNum.WORDS_NUM_15,
+                18: Bip39WordsNum.WORDS_NUM_18,
+                21: Bip39WordsNum.WORDS_NUM_21,
+                24: Bip39WordsNum.WORDS_NUM_24
+            }
+            
+            if words_num not in words_num_map:
+                logger.warning(f"Invalid mnemonic length {words_num}, using 12 words")
+                words_num = 12
+                
+            # Генерация мнемонической фразы
+            new_mnemonic = Bip39MnemonicGenerator().FromWordsNumber(words_num_map[words_num])
+            
+            logger.warning("Generated new mnemonic. Please securely store it in a safe place")
+            logger.warning(f"Mnemonic: {new_mnemonic}")
+            
+            # Попытка безопасного сохранения
+            try:
+                if self.encryption_key and CRYPTO_AVAILABLE:
+                    cipher = Fernet(self.encryption_key)
+                    encrypted_mnemonic = cipher.encrypt(str(new_mnemonic).encode())
+                    with open(mnemonic_path, 'wb') as f:
+                        f.write(encrypted_mnemonic)
+                else:
+                    with open(mnemonic_path, 'w') as f:
+                        f.write(str(new_mnemonic))
+                logger.info(f"Mnemonic backup saved to {mnemonic_path}")
+            except Exception as e:
+                logger.error(f"Error saving mnemonic: {e}")
+            
+            return str(new_mnemonic)
+            
         except Exception as e:
-            logger.error(f"Error saving mnemonic: {e}")
-        
-        return new_mnemonic
+            logger.error(f"Error generating mnemonic: {e}")
+            # Резервный метод генерации
+            import secrets
+            import hashlib
+            
+            # Генерация случайных байтов для энтропии
+            entropy_bytes = secrets.token_bytes(16)  # 16 байт = 128 бит для 12 слов
+            
+            # Использование Bip39MnemonicGenerator с энтропией
+            try:
+                new_mnemonic = Bip39MnemonicGenerator().FromEntropy(entropy_bytes)
+                logger.warning("Generated new mnemonic using fallback method")
+                return str(new_mnemonic)
+            except Exception as fallback_error:
+                logger.error(f"Fallback mnemonic generation also failed: {fallback_error}")
+                raise
 
     @rate_limited(5)  # Ограничение: 5 вызовов в секунду
     def generate_address(self, index: Optional[int] = None) -> Dict[str, Any]:
@@ -226,7 +288,8 @@ class LTCWallet:
                 "address": address,
                 "private_key": SecureData(private_key),  # Безопасное хранение приватного ключа
                 "public_key": public_key,
-                "index": address_index
+                "index": address_index,
+                "path": f"m/44'/2'/0'/0/{address_index}"
             }
             
             # Увеличиваем индекс только если не был указан конкретный индекс
@@ -235,17 +298,25 @@ class LTCWallet:
                 
             logger.info(f"Generated LTC address: {address}, index: {result['index']}")
             return result
+            
         except Exception as e:
             logger.error(f"Error generating LTC address: {e}")
             raise
 
     def get_qr_code(self, address: str, amount: float = None) -> str:
         """Генерация QR-кода для адреса"""
-        ltc_amount = f"?amount={amount}" if amount else ""
-        
-        # Всегда используем внешний сервис для генерации QR-кодов
-        # чтобы избежать проблем с портами и валидностью URL
-        return f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=litecoin:{address}{ltc_amount}"
+        try:
+            ltc_amount = f"?amount={amount}" if amount else ""
+            qr_data = f"litecoin:{address}{ltc_amount}"
+            
+            # Всегда используем внешний сервис для генерации QR-кодов
+            # чтобы избежать проблем с портами и валидностью URL
+            return f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={qr_data}"
+            
+        except Exception as e:
+            logger.error(f"Error generating QR code: {e}")
+            # Возвращаем просто адрес как fallback
+            return address
 
     def health_check(self) -> Dict[str, Any]:
         """Проверка состояния кошелька"""
@@ -257,14 +328,18 @@ class LTCWallet:
             return {
                 "status": "healthy",
                 "index": self.index_manager.index,
-                "can_generate_addresses": True
+                "can_generate_addresses": True,
+                "mnemonic_available": bool(self.mnemonic),
+                "seed_available": bool(self.seed_bytes)
             }
         except Exception as e:
             logger.error(f"Health check failed: {e}")
             return {
                 "status": "unhealthy",
                 "error": str(e),
-                "can_generate_addresses": False
+                "can_generate_addresses": False,
+                "mnemonic_available": bool(self.mnemonic),
+                "seed_available": bool(self.seed_bytes)
             }
 
     def backup_wallet(self, backup_path: str) -> bool:
@@ -272,7 +347,8 @@ class LTCWallet:
         try:
             backup_data = {
                 "mnemonic": self.mnemonic,
-                "index": self.index_manager.index
+                "index": self.index_manager.index,
+                "backup_date": time.strftime("%Y-%m-%d %H:%M:%S")
             }
             
             if self.encryption_key and CRYPTO_AVAILABLE:
@@ -284,10 +360,66 @@ class LTCWallet:
                 with open(backup_path, 'w') as f:
                     json.dump(backup_data, f)
             
+            logger.info(f"Wallet backup created at {backup_path}")
             return True
+            
         except Exception as e:
             logger.error(f"Error creating wallet backup: {e}")
             return False
 
+    def restore_wallet(self, backup_path: str) -> bool:
+        """Восстановление кошелька из резервной копии"""
+        try:
+            if not os.path.exists(backup_path):
+                logger.error(f"Backup file {backup_path} not found")
+                return False
+            
+            if self.encryption_key and CRYPTO_AVAILABLE:
+                with open(backup_path, 'rb') as f:
+                    encrypted_data = f.read()
+                cipher = Fernet(self.encryption_key)
+                decrypted_data = cipher.decrypt(encrypted_data)
+                backup_data = json.loads(decrypted_data.decode())
+            else:
+                with open(backup_path, 'r') as f:
+                    backup_data = json.load(f)
+            
+            # Восстановление мнемоники и индекса
+            self.mnemonic = backup_data['mnemonic']
+            self.index_manager.index = backup_data['index']
+            
+            # Реинициализация кошелька
+            self.seed_bytes = Bip39SeedGenerator(self.mnemonic).Generate()
+            coin_type = self.config.get('coin_type', Bip44Coins.LITECOIN)
+            self.bip44_mst = Bip44.FromSeed(self.seed_bytes, coin_type)
+            
+            logger.info("Wallet restored from backup")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error restoring wallet: {e}")
+            return False
+
+    def get_balance_info(self, address: str) -> Dict[str, Any]:
+        """Получение информации о балансе адреса"""
+        # Заглушка для реализации проверки баланса через внешний API
+        # В реальной реализации здесь должен быть вызов API блокчейна
+        return {
+            "address": address,
+            "confirmed": 0.0,
+            "unconfirmed": 0.0,
+            "total": 0.0
+        }
+
 # Глобальный экземпляр кошелька
-ltc_wallet = LTCWallet()
+try:
+    ltc_wallet = LTCWallet()
+except Exception as e:
+    logger.error(f"Failed to initialize LTC wallet: {e}")
+    # Создаем заглушку для избежания ошибок импорта
+    class FallbackWallet:
+        def generate_address(self, index=None):
+            return {"address": "ERROR", "error": str(e)}
+        def get_qr_code(self, address, amount=None):
+            return "ERROR"
+    ltc_wallet = FallbackWallet()

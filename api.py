@@ -10,6 +10,7 @@ import json
 import hashlib
 import base58
 from pathlib import Path
+import ssl
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +24,21 @@ BLOCKCHAIR_API_KEY = os.getenv('BLOCKCHAIR_API_KEY', '')
 COINGECKO_API_KEY = os.getenv('COINGECKO_API_KEY', '')
 TESTNET = os.getenv('TESTNET', 'False').lower() == 'true'
 
+# Обновленные списки Electrum серверов
 ELECTRUM_SERVERS_MAINNET = [
-    "electrum-ltc.bysh.me:50002",
+    "electrum.petrkr.net:50002",
+    "ltc-electrum.cakewallet.com:50002",
+    "electrum1.cipig.net:20063",
+    "litecoin.stackwallet.com:20063",
+    "5.78.97.174:50002",
+    "188.166.208.106:50002",
+    "electrum3.cipig.net:20063",
     "electrum.ltc.xurious.com:50002",
-    "ltc.rentonisk.com:50002",
-    "electrum.ltc.rentonisk.com:50002",
-    "electrum-ltc.tamami.fr:50002",
-    "ltc.electrum.pw:50002"
+    "electrum2.cipig.net:20063",
+    "5.161.216.180:50002",
+    "ltc.aftrek.org:50002",
+    "electrum-ltc.bysh.me:50002",
+    "backup.electrum-ltc.org:50002"
 ]
 
 ELECTRUM_SERVERS_TESTNET = [
@@ -63,6 +72,9 @@ class ElectrumClient:
         self.reader = None
         self.writer = None
         self.request_id = 0
+        self.ssl_context = ssl.create_default_context()
+        self.ssl_context.check_hostname = False
+        self.ssl_context.verify_mode = ssl.CERT_NONE
         
     async def connect(self):
         """Подключение к Electrum серверу с улучшенной обработкой ошибок"""
@@ -80,7 +92,7 @@ class ElectrumClient:
             try:
                 host, port = server.split(':')
                 self.reader, self.writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, int(port)),
+                    asyncio.open_connection(host, int(port), ssl=self.ssl_context),
                     timeout=ELECTRUM_CONNECT_TIMEOUT
                 )
                 self.current_server = server
@@ -592,72 +604,10 @@ async def _set_cached_address_data(address: str, testnet: bool, data: Dict[str, 
         _address_cache[cache_key] = (data, time.time())
         logger.debug(f"Cached data for address {address}")
 
-async def prioritized_transaction_check(address: str, expected_amount: float, testnet: bool = TESTNET, timeout: int = 1200) -> bool:
-    """
-    Проверка LTC транзакции с приоритетом Electrum и таймаутом 20 минут
-    Сначала проверяет через Electrum, затем через другие сервисы после таймаута
-    """
-    start_time = time.time()
-    
-    logger.info(f"Starting Electrum check for address {address}, expected amount: {expected_amount}")
-    electrum_data = await check_transaction_electrum(address, expected_amount, testnet)
-    
-    if electrum_data and (electrum_data['received'] + electrum_data.get('unconfirmed_balance', 0)) >= expected_amount:
-        logger.info(f"Transaction found via Electrum: {electrum_data}")
-        await _set_cached_address_data(address, testnet, electrum_data)
-        return True
-    
-    while time.time() - start_time < timeout:
-        elapsed_time = time.time() - start_time
-        remaining_time = timeout - elapsed_time
-        logger.info(f"Transaction not found yet. Elapsed: {elapsed_time:.0f}s, remaining: {remaining_time:.0f}s")
-        
-        await asyncio.sleep(60)
-        
-        electrum_data = await check_transaction_electrum(address, expected_amount, testnet)
-        if electrum_data and (electrum_data['received'] + electrum_data.get('unconfirmed_balance', 0)) >= expected_amount:
-            logger.info(f"Transaction found via Electrum after {time.time() - start_time:.0f}s: {electrum_data}")
-            await _set_cached_address_data(address, testnet, electrum_data)
-            return True
-    
-    logger.info(f"Electrum timeout reached after {timeout}s, checking other providers for address {address}")
-    
-    providers = [
-        ('blockchair', check_transaction_blockchair),
-        ('sochain', check_transaction_sochain),
-        ('nownodes', check_transaction_nownodes),
-        ('blockcypher', check_transaction_blockcypher)
-    ]
-    
-    for provider_name, provider_func in providers:
-        if testnet and provider_name == 'blockchair':
-            continue  # Blockchair не поддерживает testnet
-            
-        provider_data = await provider_func(address, expected_amount, testnet)
-        if provider_data:
-            # Для разных провайдеров могут быть разные форматы данных
-            received_amount = 0
-            if provider_name == 'sochain':
-                received_amount = provider_data.get('balance', 0)
-            else:
-                received_amount = provider_data.get('received', 0)
-                
-            # Учитываем неподтвержденные балансы для BlockCypher
-            if provider_name == 'blockcypher':
-                received_amount += provider_data.get('unconfirmed_balance', 0)
-            
-            if received_amount >= expected_amount:
-                logger.info(f"Transaction found via {provider_name}: {provider_data}")
-                await _set_cached_address_data(address, testnet, provider_data)
-                return True
-    
-    logger.info("No transaction found with expected amount within timeout period")
-    return False
-
 async def check_ltc_transaction(address: str, expected_amount: float, testnet: bool = TESTNET) -> bool:
     """
     Проверка LTC транзакции через несколько эксплореров
-    Теперь использует приоритетную проверку через Electrum с таймаутом 20 минут
+    Если Electrum серверы недоступны после 3 попыток, сразу переходим к другим провайдерам
     """
     try:
         # Проверяем кеш перед обращением к API
@@ -666,8 +616,53 @@ async def check_ltc_transaction(address: str, expected_amount: float, testnet: b
             logger.info(f"Transaction found in cache for address {address}")
             return True
         
-        # Используем приоритетную проверку с таймаутом 20 минут
-        return await prioritized_transaction_check(address, expected_amount, testnet, timeout=1200)
+        # Сначала пробуем Electrum
+        electrum_data = None
+        try:
+            electrum_data = await asyncio.wait_for(
+                check_transaction_electrum(address, expected_amount, testnet),
+                timeout=30.0
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning(f"Electrum check failed: {e}")
+        
+        if electrum_data and (electrum_data['received'] + electrum_data.get('unconfirmed_balance', 0)) >= expected_amount:
+            logger.info(f"Transaction found via Electrum: {electrum_data}")
+            await _set_cached_address_data(address, testnet, electrum_data)
+            return True
+        
+        # Если Electrum не доступен или не нашел транзакцию, пробуем другие провайдеры
+        providers = [
+            ('blockchair', check_transaction_blockchair),
+            ('sochain', check_transaction_sochain),
+            ('nownodes', check_transaction_nownodes),
+            ('blockcypher', check_transaction_blockcypher)
+        ]
+        
+        for provider_name, provider_func in providers:
+            if testnet and provider_name == 'blockchair':
+                continue  # Blockchair не поддерживает testnet
+                
+            provider_data = await provider_func(address, expected_amount, testnet)
+            if provider_data:
+                # Для разных провайдеров могут быть разные форматы данных
+                received_amount = 0
+                if provider_name == 'sochain':
+                    received_amount = provider_data.get('balance', 0)
+                else:
+                    received_amount = provider_data.get('received', 0)
+                    
+                # Учитываем неподтвержденные балансы для BlockCypher
+                if provider_name == 'blockcypher':
+                    received_amount += provider_data.get('unconfirmed_balance', 0)
+                
+                if received_amount >= expected_amount:
+                    logger.info(f"Transaction found via {provider_name}: {provider_data}")
+                    await _set_cached_address_data(address, testnet, provider_data)
+                    return True
+        
+        logger.info("No transaction found with expected amount")
+        return False
             
     except Exception as e:
         logger.error(f"Error checking LTC transaction: {e}")
@@ -727,59 +722,3 @@ async def check_electrum_servers_health():
             logger.error(f"Electrum health check failed: {e}")
         
         await asyncio.sleep(300)  # Проверяем каждые 5 минут
-
-async def check_ltc_transaction_fallback(address: str, expected_amount: float, testnet: bool = TESTNET) -> bool:
-    """
-    Проверка LTC транзакции с немедленным переходом к другим провайдерам, если Electrum недоступен
-    """
-    try:
-        cached_data, from_cache = await _get_cached_address_data(address, testnet)
-        if from_cache and cached_data and cached_data.get('received', 0) >= expected_amount:
-            logger.info(f"Transaction found in cache for address {address}")
-            return True
-        
-        try:
-            electrum_data = await asyncio.wait_for(
-                check_transaction_electrum(address, expected_amount, testnet),
-                timeout=30.0
-            )
-            if electrum_data and (electrum_data['received'] + electrum_data.get('unconfirmed_balance', 0)) >= expected_amount:
-                logger.info(f"Transaction found via Electrum: {electrum_data}")
-                await _set_cached_address_data(address, testnet, electrum_data)
-                return True
-        except (asyncio.TimeoutError, Exception) as e:
-            logger.warning(f"Electrum check failed, using fallback providers immediately: {e}")
-        
-        providers = [
-            ('blockchair', check_transaction_blockchair),
-            ('sochain', check_transaction_sochain),
-            ('nownodes', check_transaction_nownodes),
-            ('blockcypher', check_transaction_blockcypher)
-        ]
-        
-        for provider_name, provider_func in providers:
-            if testnet and provider_name == 'blockchair':
-                continue
-                
-            provider_data = await provider_func(address, expected_amount, testnet)
-            if provider_data:
-                received_amount = 0
-                if provider_name == 'sochain':
-                    received_amount = provider_data.get('balance', 0)
-                else:
-                    received_amount = provider_data.get('received', 0)
-                    
-                if provider_name == 'blockcypher':
-                    received_amount += provider_data.get('unconfirmed_balance', 0)
-                
-                if received_amount >= expected_amount:
-                    logger.info(f"Transaction found via {provider_name}: {provider_data}")
-                    await _set_cached_address_data(address, testnet, provider_data)
-                    return True
-        
-        logger.info("No transaction found with expected amount")
-        return False
-            
-    except Exception as e:
-        logger.error(f"Error checking LTC transaction: {e}")
-        return False

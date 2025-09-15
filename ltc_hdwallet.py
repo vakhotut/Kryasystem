@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import io
+import re
 from typing import Dict, Any, Optional
 from functools import wraps
 
@@ -12,9 +13,19 @@ from bip_utils import (
     Bip39SeedGenerator,
     Bip39WordsNum,
     Bip39Languages,
-    Bip44,
-    Bip44Coins,
-    Bip44Changes
+    Bip84,  # Изменено с Bip44 на Bip84
+    Bip84Coins,  # Изменено с Bip44Coins на Bip84Coins
+    Bip84Changes,  # Изменено с Bip44Changes на Bip84Changes
+    Bip44Coins,  # Оставляем для обратной совместимости
+    Bip44Changes  # Оставляем для обратной совместимости
+)
+
+# Добавим валидацию адресов Litecoin
+from bip_utils import (
+    BchAddrConverter,
+    LtcAddrDecoder,
+    LtcAddrEncoder,
+    P2WPKH
 )
 
 # Попытаемся импортировать дополнительные библиотеки безопасности
@@ -130,16 +141,16 @@ class LTCWallet:
         # Генерация seed из мнемоники
         self.seed_bytes = Bip39SeedGenerator(self.mnemonic).Generate()
         
-        # Создание BIP44 кошелька для Litecoin
-        coin_type = self.config.get('coin_type', Bip44Coins.LITECOIN)
-        self.bip44_mst = Bip44.FromSeed(self.seed_bytes, coin_type)
+        # Создание BIP84 кошелька для Litecoin (изменено с BIP44)
+        coin_type = self.config.get('coin_type', Bip84Coins.LITECOIN)
+        self.bip84_mst = Bip84.FromSeed(self.seed_bytes, coin_type)  # Изменено с Bip44 на Bip84
         
         logger.info("LTC Wallet initialized with enhanced security")
 
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Загрузка конфигурации из файла"""
         default_config = {
-            'coin_type': Bip44Coins.LITECOIN,
+            'coin_type': Bip84Coins.LITECOIN,  # Изменено с Bip44Coins.LITECOIN
             'index_storage_path': 'wallet_state.json',
             'max_addresses_per_second': 5,
             'mnemonic_length': 12  # 12, 15, 18, 21 или 24 слова
@@ -276,20 +287,24 @@ class LTCWallet:
             else:
                 address_index = self.index_manager.index
             
-            # Генерация адреса по индексу: m/44'/2'/0'/0/address_index
-            bip44_acc = self.bip44_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_index)
+            # Генерация адреса по индексу: m/84'/2'/0'/0/address_index (BIP84)
+            bip84_acc = self.bip84_mst.Purpose().Coin().Account(0).Change(Bip84Changes.CHAIN_EXT).AddressIndex(address_index)
             
             # Получение адреса и ключей
-            address = bip44_acc.PublicKey().ToAddress()
-            private_key = bip44_acc.PrivateKey().Raw().ToHex()
-            public_key = bip44_acc.PublicKey().RawCompressed().ToHex()
+            address = bip84_acc.PublicKey().ToAddress()
+            private_key = bip84_acc.PrivateKey().Raw().ToHex()
+            public_key = bip84_acc.PublicKey().RawCompressed().ToHex()
+            
+            # Валидация сгенерированного адреса
+            if not self.validate_address(address):
+                raise ValueError(f"Generated invalid Litecoin address: {address}")
             
             result = {
                 "address": address,
                 "private_key": SecureData(private_key),  # Безопасное хранение приватного ключа
                 "public_key": public_key,
                 "index": address_index,
-                "path": f"m/44'/2'/0'/0/{address_index}"
+                "path": f"m/84'/2'/0'/0/{address_index}"  # Обновлен путь для BIP84
             }
             
             # Увеличиваем индекс только если не был указан конкретный индекс
@@ -303,9 +318,41 @@ class LTCWallet:
             logger.error(f"Error generating LTC address: {e}")
             raise
 
+    def validate_address(self, address: str) -> bool:
+        """
+        Валидация адреса Litecoin.
+        Поддерживает адреса форматов:
+        - P2PKH (начинаются с 'L')
+        - P2SH (начинаются с 'M')
+        - Bech32 (начинаются с 'ltc1')
+        """
+        try:
+            # Проверка Bech32 адресов (начинаются с ltc1)
+            if address.startswith('ltc1'):
+                # Декодируем и снова кодируем для проверки
+                decoded = LtcAddrDecoder.Decode(address)
+                encoded = LtcAddrEncoder.Encode(decoded)
+                return encoded == address
+            
+            # Проверка Legacy адресов (начинаются с L или M)
+            elif address.startswith('L') or address.startswith('M'):
+                # Конвертируем в cash адрес для проверки
+                cash_addr = BchAddrConverter.ToCashAddress(address)
+                # Конвертируем обратно для проверки
+                legacy_addr = BchAddrConverter.ToLegacyAddress(cash_addr)
+                return legacy_addr == address
+            
+            return False
+        except:
+            return False
+
     def get_qr_code(self, address: str, amount: float = None) -> str:
         """Генерация QR-кода для адреса"""
         try:
+            # Валидация адреса перед генерацией QR-кода
+            if not self.validate_address(address):
+                raise ValueError(f"Invalid Litecoin address: {address}")
+                
             ltc_amount = f"?amount={amount}" if amount else ""
             qr_data = f"litecoin:{address}{ltc_amount}"
             
@@ -322,15 +369,19 @@ class LTCWallet:
         """Проверка состояния кошелька"""
         try:
             # Проверка базовой функциональности
-            test_account = self.bip44_mst.Purpose().Coin().Account(0)
-            test_address = test_account.Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+            test_account = self.bip84_mst.Purpose().Coin().Account(0)
+            test_address = test_account.Change(Bip84Changes.CHAIN_EXT).AddressIndex(0)
+            
+            # Валидация тестового адреса
+            address_valid = self.validate_address(test_address.PublicKey().ToAddress())
             
             return {
                 "status": "healthy",
                 "index": self.index_manager.index,
                 "can_generate_addresses": True,
                 "mnemonic_available": bool(self.mnemonic),
-                "seed_available": bool(self.seed_bytes)
+                "seed_available": bool(self.seed_bytes),
+                "address_validation_working": address_valid
             }
         except Exception as e:
             logger.error(f"Health check failed: {e}")
@@ -339,7 +390,8 @@ class LTCWallet:
                 "error": str(e),
                 "can_generate_addresses": False,
                 "mnemonic_available": bool(self.mnemonic),
-                "seed_available": bool(self.seed_bytes)
+                "seed_available": bool(self.seed_bytes),
+                "address_validation_working": False
             }
 
     def backup_wallet(self, backup_path: str) -> bool:
@@ -348,7 +400,8 @@ class LTCWallet:
             backup_data = {
                 "mnemonic": self.mnemonic,
                 "index": self.index_manager.index,
-                "backup_date": time.strftime("%Y-%m-%d %H:%M:%S")
+                "backup_date": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "address_type": "BIP84"  # Добавляем информацию о типе адресов
             }
             
             if self.encryption_key and CRYPTO_AVAILABLE:
@@ -390,8 +443,8 @@ class LTCWallet:
             
             # Реинициализация кошелька
             self.seed_bytes = Bip39SeedGenerator(self.mnemonic).Generate()
-            coin_type = self.config.get('coin_type', Bip44Coins.LITECOIN)
-            self.bip44_mst = Bip44.FromSeed(self.seed_bytes, coin_type)
+            coin_type = self.config.get('coin_type', Bip84Coins.LITECOIN)
+            self.bip84_mst = Bip84.FromSeed(self.seed_bytes, coin_type)
             
             logger.info("Wallet restored from backup")
             return True
@@ -402,6 +455,16 @@ class LTCWallet:
 
     def get_balance_info(self, address: str) -> Dict[str, Any]:
         """Получение информации о балансе адреса"""
+        # Валидация адреса перед запросом баланса
+        if not self.validate_address(address):
+            return {
+                "address": address,
+                "error": "Invalid Litecoin address",
+                "confirmed": 0.0,
+                "unconfirmed": 0.0,
+                "total": 0.0
+            }
+        
         # Заглушка для реализации проверки баланса через внешний API
         # В реальной реализации здесь должен быть вызов API блокчейна
         return {
@@ -422,4 +485,6 @@ except Exception as e:
             return {"address": "ERROR", "error": str(e)}
         def get_qr_code(self, address, amount=None):
             return "ERROR"
+        def validate_address(self, address):
+            return False
     ltc_wallet = FallbackWallet()

@@ -314,11 +314,29 @@ async def init_db(database_url):
             CREATE TABLE IF NOT EXISTS generated_addresses (
                 id SERIAL PRIMARY KEY,
                 address TEXT UNIQUE NOT NULL,
+                user_id BIGINT REFERENCES users(user_id),
                 index INTEGER NOT NULL,
                 label TEXT,
+                expected_amount REAL,
                 balance REAL DEFAULT 0.0,
                 transaction_count INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            ''')
+            
+            # Таблица для депозитов
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS deposits (
+                id SERIAL PRIMARY KEY,
+                txid TEXT UNIQUE NOT NULL,
+                address TEXT NOT NULL,
+                user_id BIGINT NOT NULL REFERENCES users(user_id),
+                amount_ltc REAL NOT NULL,
+                amount_usd REAL NOT NULL,
+                confirmations INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
             
@@ -419,7 +437,8 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
                 'almost_banned': '⚠️ Внимание! После еще {remaining} неудачных попыток вы будете забанены на 24 часа!',
                 'product_out_of_stock': '❌ Товар временно отсутствует',
                 'product_reserved': '✅ Товар забронирован',
-                'product_released': '✅ Товар возвращен в продажу'
+                'product_released': '✅ Товар возвращен в продажу',
+                'deposit_confirmed': '✅ Депозит подтвержден! Зачислено: {amount_usd:.2f}$ (≈{amount_ltc} LTC)'
             },
             'en': {
                 'welcome': 'Welcome!',
@@ -504,7 +523,8 @@ Georgian: https://telegra.ph/KA-როგორ-შევავსოთ-ბა�
                 'almost_banned': '⚠️ Warning! After {remaining} more failed attempts you will be banned for 24 hours!',
                 'product_out_of_stock': '❌ Product temporarily out of stock',
                 'product_reserved': '✅ Product reserved',
-                'product_released': '✅ Product returned to stock'
+                'product_released': '✅ Product returned to stock',
+                'deposit_confirmed': '✅ Deposit confirmed! Credited: {amount_usd:.2f}$ (≈{amount_ltc} LTC)'
             },
             'ka': {
                 'welcome': 'კეთილი იყოს თქვენი მობრძანება!',
@@ -582,14 +602,15 @@ English: https://telegra.ph/EN-How-to-Top-Up-Balance-via-Litecoin-LTC-06-15
 • გადაიხადეთ ზუსტი რაოდენობა მითითებულ მისამართზე
 • 3 ქსელური დადასტურების შემდეგ პროდუქტი გაიგზავნება
 • გაუქმების ან დროის ამოწურვის შემთხვევაში - +1 წარუმატებელი მცდელობა
-• 3 წარუ�муატებელი მცდელობა - 24 საათიანი ბანი''',
+• 3 წარუმატებელი მცდელობა - 24 საათიანი ბანი''',
                 'invoice_time_left': '⏱ ინვოისის გაუქმებამდე დარჩა: {time_left}',
                 'invoice_cancelled': '❌ ინვოისი გაუქმებულია. წარუმატებელი მცდელობები: {failed_count}/3',
-                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუ�муატებელი მცდელობები: {failed_count}/3',
+                'invoice_expired': '⏰ ინვოისის დრო ამოიწურა. წარუმატებელი მცდელობები: {failed_count}/3',
                 'almost_banned': '⚠️ გაფრთხილება! კიდევ {remaining} წარუმატებელი მცდელობის შემდეგ დაბლოკილი იქნებით 24 საათის განმავლობაში!',
                 'product_out_of_stock': '❌ პროდუქტი დროებით არ არის მარაგში',
                 'product_reserved': '✅ პროდუქტი დაჯავშნულია',
-                'product_released': '✅ პროდუქტი დაბრუნდა მარაგში'
+                'product_released': '✅ პროდუქტი დაბრუნდა მარაგში',
+                'deposit_confirmed': '✅ დეპოზიტი დადასტურებულია! ჩაირიცხა: {amount_usd:.2f}$ (≈{amount_ltc} LTC)'
             }
         }
         
@@ -1303,14 +1324,17 @@ async def reset_api_limits():
         logger.error(f"Error resetting API limits: {e}")
 
 # Функции для работы с сгенерированными адресами
-async def add_generated_address(address, index, label=None):
+async def add_generated_address(address, index, user_id=None, label=None, expected_amount=None):
     try:
         async with db_pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO generated_addresses (address, index, label)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (address) DO UPDATE SET label = EXCLUDED.label
-            ''', address, index, label)
+                INSERT INTO generated_addresses (address, user_id, index, label, expected_amount)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (address) DO UPDATE SET 
+                user_id = EXCLUDED.user_id,
+                label = EXCLUDED.label,
+                expected_amount = EXCLUDED.expected_amount
+            ''', address, user_id, index, label, expected_amount)
             return True
     except Exception as e:
         logger.error(f"Error adding generated address: {e}")
@@ -1340,6 +1364,88 @@ async def get_generated_addresses(limit=50, offset=0):
     except Exception as e:
         logger.error(f"Error getting generated addresses: {e}")
         return []
+
+async def get_deposit_address(user_id):
+    """Получение последнего адреса депозита для пользователя"""
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetchval('''
+                SELECT address FROM generated_addresses 
+                WHERE user_id = $1 
+                ORDER BY created_at DESC 
+                LIMIT 1
+            ''', user_id)
+    except Exception as e:
+        logger.error(f"Error getting deposit address for user {user_id}: {e}")
+        return None
+
+async def create_deposit(txid, address, user_id, amount_ltc, amount_usd, confirmations=0, status='pending'):
+    """Создание записи о депозите"""
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO deposits (txid, address, user_id, amount_ltc, amount_usd, confirmations, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (txid) DO UPDATE SET
+                confirmations = EXCLUDED.confirmations,
+                status = EXCLUDED.status,
+                updated_at = CURRENT_TIMESTAMP
+            ''', txid, address, user_id, amount_ltc, amount_usd, confirmations, status)
+            return True
+    except Exception as e:
+        logger.error(f"Error creating deposit: {e}")
+        return False
+
+async def update_deposit_confirmations(txid, confirmations):
+    """Обновление количества подтверждений для депозита"""
+    try:
+        async with db_pool.acquire() as conn:
+            status = 'confirmed' if confirmations >= 3 else 'pending'
+            await conn.execute('''
+                UPDATE deposits 
+                SET confirmations = $1, status = $2, updated_at = CURRENT_TIMESTAMP
+                WHERE txid = $3
+            ''', confirmations, status, txid)
+            return True
+    except Exception as e:
+        logger.error(f"Error updating deposit confirmations: {e}")
+        return False
+
+async def get_pending_deposits():
+    """Получение всех ожидающих депозитов"""
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetch('''
+                SELECT * FROM deposits 
+                WHERE status = 'pending' 
+                ORDER BY created_at DESC
+            ''')
+    except Exception as e:
+        logger.error(f"Error getting pending deposits: {e}")
+        return []
+
+async def process_confirmed_deposit(txid, user_id, amount_usd):
+    """Обработка подтвержденного депозита - зачисление средств на баланс"""
+    try:
+        async with db_pool.acquire() as conn:
+            # Зачисляем средства на баланс пользователя
+            await conn.execute('''
+                UPDATE users 
+                SET balance = balance + $1 
+                WHERE user_id = $2
+            ''', amount_usd, user_id)
+            
+            # Обновляем статус депозита
+            await conn.execute('''
+                UPDATE deposits 
+                SET status = 'processed' 
+                WHERE txid = $1
+            ''', txid)
+            
+            return True
+    except Exception as e:
+        logger.error(f"Error processing confirmed deposit: {e}")
+        return False
 
 async def update_api_limits(explorer_name, daily_limit):
     """Обновление дневного лимита для API"""

@@ -1,11 +1,11 @@
 import aiohttp
 import logging
 import asyncio
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 import os
 import time
-import re
 import json
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,11 @@ _rate_cache = {}
 _address_cache = {}
 _cache_lock = asyncio.Lock()
 RATE_CACHE_TTL = 30  # Время жизни кеша курсов в секундах
+
+# WebSocket соединение
+_websocket = None
+_websocket_lock = asyncio.Lock()
+_tracked_addresses = set()
 
 # DB helpers (assumed to exist in your project)
 from db import increment_api_request, get_api_limits
@@ -61,14 +66,61 @@ async def _set_cached_address_data(address: str, testnet: bool, data: Dict[str, 
         _address_cache[cache_key] = (data, time.time())
         logger.debug(f"Cached data for address {address}")
 
-async def check_transaction_litecoinspace(address: str, expected_amount: float, testnet: bool = False) -> Optional[Dict[str, Any]]:
+async def check_transaction_litecoinspace_api(address: str, expected_amount: float, testnet: bool = False) -> Optional[Dict[str, Any]]:
     """
-    Получает данные по адресу с litecoinspace.org (парсит публичную страницу)
-    Возвращает словарь с полями: balance, received, transaction_count (если найдено)
+    Получает данные по адресу через официальный API litecoinspace.org
+    Возвращает словарь с полями: balance, received, transaction_count
     """
     if not await check_api_limit('litecoinspace'):
         return None
         
+    if testnet:
+        logger.warning("Litecoinspace.org does not support testnet")
+        return None
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Получаем историю транзакций
+            url = f"https://litecoinspace.org/api/address/{address}/txs"
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
+                if response.status == 200:
+                    transactions = await response.json()
+                    
+                    # Вычисляем общую полученную сумму
+                    total_received = 0
+                    confirmed_txs = 0
+                    
+                    for tx in transactions:
+                        if tx.get('status', {}).get('confirmed', False):
+                            confirmed_txs += 1
+                            for vout in tx.get('vout', []):
+                                if 'scriptPubKey' in vout and 'addresses' in vout['scriptPubKey']:
+                                    if address in vout['scriptPubKey']['addresses']:
+                                        total_received += vout.get('value', 0)
+                    
+                    # Получаем информацию о difficulty adjustment для дополнительных данных
+                    difficulty_url = "https://litecoinspace.org/api/v1/difficulty-adjustment"
+                    async with session.get(difficulty_url, timeout=API_REQUEST_TIMEOUT) as diff_response:
+                        difficulty_data = await diff_response.json() if diff_response.status == 200 else {}
+                    
+                    return {
+                        'received': total_received,
+                        'transaction_count': confirmed_txs,
+                        'difficulty_data': difficulty_data,
+                        'source': 'litecoinspace_api'
+                    }
+                else:
+                    logger.warning(f"Litecoinspace API returned status {response.status}")
+                    return None
+    except Exception as e:
+        logger.error(f"Litecoinspace API error: {e}")
+        return None
+
+async def check_transaction_litecoinspace_html(address: str, expected_amount: float, testnet: bool = False) -> Optional[Dict[str, Any]]:
+    """
+    Получает данные по адресу с litecoinspace.org (парсит публичную страницу)
+    Используется как fallback, если API не работает
+    """
     if testnet:
         logger.warning("Litecoinspace.org does not support testnet")
         return None
@@ -80,33 +132,66 @@ async def check_transaction_litecoinspace(address: str, expected_amount: float, 
                 if response.status == 200:
                     html = await response.text()
                     
-                    # Парсим HTML для извлечения данных
-                    balance_match = re.search(r'Final Balance.*?([\d.]+)\s*LTC', html, re.DOTALL)
-                    received_match = re.search(r'Total Received.*?([\d.]+)\s*LTC', html, re.DOTALL)
-                    txs_match = re.search(r'No\. Transactions.*?(\d+)', html, re.DOTALL)
+                    # Используем BeautifulSoup для парсинга HTML
+                    soup = BeautifulSoup(html, 'html.parser')
                     
-                    if balance_match and received_match and txs_match:
-                        balance = float(balance_match.group(1))
-                        received = float(received_match.group(1))
-                        txs_count = int(txs_match.group(1))
-                        
-                        return {
-                            'balance': balance,
-                            'received': received,
-                            'transaction_count': txs_count
-                        }
-                    else:
-                        logger.error("Failed to parse data from litecoinspace.org")
+                    # Ищем элементы с данными
+                    balance_element = soup.find('span', {'class': 'final-balance'})
+                    received_element = soup.find('span', {'class': 'total-received'})
+                    txs_element = soup.find('span', {'class': 'transaction-count'})
+                    
+                    # Альтернативный поиск, если классы изменились
+                    if not balance_element:
+                        balance_td = soup.find('td', text='Final Balance')
+                        balance_element = balance_td.find_next_sibling('td') if balance_td else None
+                    if not received_element:
+                        received_td = soup.find('td', text='Total Received')
+                        received_element = received_td.find_next_sibling('td') if received_td else None
+                    if not txs_element:
+                        txs_td = soup.find('td', text='No. Transactions')
+                        txs_element = txs_td.find_next_sibling('td') if txs_td else None
+                    
+                    balance = 0.0
+                    received = 0.0
+                    txs_count = 0
+                    
+                    if balance_element:
+                        balance_text = balance_element.get_text().strip().replace('LTC', '').strip()
+                        try:
+                            balance = float(balance_text) if balance_text else 0.0
+                        except ValueError:
+                            balance = 0.0
+                    
+                    if received_element:
+                        received_text = received_element.get_text().strip().replace('LTC', '').strip()
+                        try:
+                            received = float(received_text) if received_text else 0.0
+                        except ValueError:
+                            received = 0.0
+                    
+                    if txs_element:
+                        txs_text = txs_element.get_text().strip()
+                        try:
+                            txs_count = int(txs_text) if txs_text.isdigit() else 0
+                        except ValueError:
+                            txs_count = 0
+                    
+                    return {
+                        'balance': balance,
+                        'received': received,
+                        'transaction_count': txs_count,
+                        'source': 'litecoinspace_html'
+                    }
                 else:
                     logger.error(f"Litecoinspace.org returned status {response.status}")
     except Exception as e:
-        logger.error(f"Litecoinspace.org API error: {e}")
+        logger.error(f"Litecoinspace.org HTML parsing error: {e}")
     return None
 
 async def check_ltc_transaction(address: str, expected_amount: float, testnet: bool = False) -> bool:
     """
-    Основная функция проверки транзакции - использует только litecoinspace.org
-    Кеширует результаты в памяти на CACHE_TTL секунд.
+    Основная функция проверки транзакции
+    Сначала пытается использовать API, затем fallback на парсинг HTML
     """
     try:
         cached_data, from_cache = await _get_cached_address_data(address, testnet)
@@ -114,10 +199,18 @@ async def check_ltc_transaction(address: str, expected_amount: float, testnet: b
             logger.info(f"Transaction found in cache for address {address}")
             return True
 
-        data = await check_transaction_litecoinspace(address, expected_amount, testnet)
-        if data and data.get('received', 0) >= expected_amount:
-            logger.info(f"Transaction found via litecoinspace.org: {data}")
-            await _set_cached_address_data(address, testnet, data)
+        # Сначала пробуем API
+        api_data = await check_transaction_litecoinspace_api(address, expected_amount, testnet)
+        if api_data and api_data.get('received', 0) >= expected_amount:
+            logger.info(f"Transaction found via Litecoinspace API: {api_data}")
+            await _set_cached_address_data(address, testnet, api_data)
+            return True
+        
+        # Если API не сработал или сумма недостаточна, пробуем парсинг HTML
+        html_data = await check_transaction_litecoinspace_html(address, expected_amount, testnet)
+        if html_data and html_data.get('received', 0) >= expected_amount:
+            logger.info(f"Transaction found via Litecoinspace HTML: {html_data}")
+            await _set_cached_address_data(address, testnet, html_data)
             return True
             
         logger.info("No transaction found with expected amount")
@@ -128,7 +221,114 @@ async def check_ltc_transaction(address: str, expected_amount: float, testnet: b
     logger.info("No transaction found with expected amount")
     return False
 
-# Функции для получения курса LTC (оставлены без изменений)
+async def init_websocket():
+    """Инициализация WebSocket соединения с litecoinspace.org"""
+    global _websocket
+    async with _websocket_lock:
+        if _websocket is None:
+            try:
+                # Создаем WebSocket соединение
+                _websocket = await aiohttp.ClientSession().ws_connect(
+                    "wss://litecoinspace.org/api/v1/ws",
+                    timeout=API_REQUEST_TIMEOUT
+                )
+                
+                # Подписываемся на получение блоков и статистики
+                await _websocket.send_json({
+                    'action': 'want',
+                    'data': ['blocks', 'stats', 'mempool-blocks', 'live-2h-chart']
+                })
+                
+                logger.info("WebSocket connection to Litecoinspace established")
+                
+                # Запускаем обработчик сообщений
+                asyncio.create_task(_websocket_message_handler())
+                
+            except Exception as e:
+                logger.error(f"Failed to establish WebSocket connection: {e}")
+                _websocket = None
+
+async def _websocket_message_handler():
+    """Обработчик сообщений от WebSocket"""
+    global _websocket
+    try:
+        async for msg in _websocket:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                data = json.loads(msg.data)
+                
+                # Обрабатываем разные типы сообщений
+                if 'block' in data:
+                    logger.info(f"New block: {data['block']['height']}")
+                elif 'mempoolInfo' in data:
+                    logger.debug(f"Mempool info: {data['mempoolInfo']}")
+                elif 'transactions' in data:
+                    logger.debug(f"New transactions: {len(data['transactions'])}")
+                elif 'mempool-blocks' in data:
+                    logger.debug(f"Mempool blocks: {len(data['mempool-blocks'])}")
+                elif 'address-transactions' in data:
+                    # Обработка транзакций связанных с отслеживаемыми адресами
+                    for tx in data['address-transactions']:
+                        logger.info(f"New transaction for tracked address: {tx['txid']}")
+                elif 'block-transactions' in data:
+                    # Обработка подтвержденных транзакций
+                    for tx in data['block-transactions']:
+                        logger.info(f"Block confirmed transaction: {tx['txid']}")
+                    
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                logger.error("WebSocket error occurred")
+                break
+            elif msg.type == aiohttp.WSMsgType.CLOSED:
+                logger.info("WebSocket connection closed")
+                break
+                
+    except Exception as e:
+        logger.error(f"WebSocket message handler error: {e}")
+    finally:
+        _websocket = None
+
+async def track_address(address: str):
+    """Подписывается на отслеживание транзакций для указанного адреса"""
+    global _tracked_addresses
+    try:
+        await init_websocket()
+        if _websocket and not _websocket.closed:
+            await _websocket.send_json({
+                'track-address': address
+            })
+            _tracked_addresses.add(address)
+            logger.info(f"Started tracking address: {address}")
+        else:
+            logger.warning("WebSocket not available for address tracking")
+    except Exception as e:
+        logger.error(f"Failed to track address {address}: {e}")
+
+async def untrack_address(address: str):
+    """Отписывается от отслеживания транзакций для указанного адреса"""
+    global _tracked_addresses
+    try:
+        if _websocket and not _websocket.closed and address in _tracked_addresses:
+            await _websocket.send_json({
+                'untrack-address': address
+            })
+            _tracked_addresses.remove(address)
+            logger.info(f"Stopped tracking address: {address}")
+    except Exception as e:
+        logger.error(f"Failed to untrack address {address}: {e}")
+
+async def get_difficulty_adjustment() -> Optional[Dict[str, Any]]:
+    """Получает информацию о корректировке сложности сети"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = "https://litecoinspace.org/api/v1/difficulty-adjustment"
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logger.warning(f"Difficulty adjustment API returned status {response.status}")
+    except Exception as e:
+        logger.error(f"Difficulty adjustment API error: {e}")
+    return None
+
 async def get_binance_ltc_rate(symbol: str = 'LTCUSDT') -> Optional[float]:
     """Получение курса LTC от Binance API"""
     if not await check_api_limit('binance'):
@@ -324,8 +524,13 @@ async def cleanup_cache():
             logger.debug(f"Removed expired rate cache entry for key: {key}")
 
 def get_key_usage_stats() -> Dict[str, Any]:
-    """Минимальная статистика (удалены все внешние explorer-ключи)"""
+    """Минимальная статистика"""
     return {
         "cache_size": len(_address_cache),
-        "rate_cache_size": len(_rate_cache)
-                        }
+        "rate_cache_size": len(_rate_cache),
+        "websocket_connected": _websocket is not None and not _websocket.closed,
+        "tracked_addresses_count": len(_tracked_addresses)
+    }
+
+# Инициализация WebSocket при импорте модуля
+asyncio.create_task(init_websocket())

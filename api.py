@@ -1,16 +1,19 @@
 import aiohttp
 import logging
 import asyncio
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Set
 import os
 import time
 import json
 from bs4 import BeautifulSoup
+import re
 
 logger = logging.getLogger(__name__)
 
 API_REQUEST_TIMEOUT = 10.0
 CACHE_TTL = 60  # Время жизни кеша в секундах
+RATE_CACHE_TTL = 30  # Время жизни кеша курсов в секундах
+MIN_CONFIRMATIONS = 6  # Минимальное количество подтверждений для безопасности
 
 # API ключи
 COINGECKO_API_KEY = os.getenv('COINGECKO_API_KEY', '')
@@ -20,12 +23,11 @@ TESTNET = os.getenv('TESTNET', 'False').lower() == 'true'
 _rate_cache = {}
 _address_cache = {}
 _cache_lock = asyncio.Lock()
-RATE_CACHE_TTL = 30  # Время жизни кеша курсов в секундах
 
 # WebSocket соединение
 _websocket = None
 _websocket_lock = asyncio.Lock()
-_tracked_addresses = set()
+_tracked_addresses: Set[str] = set()
 
 # DB helpers (assumed to exist in your project)
 from db import increment_api_request, get_api_limits
@@ -49,6 +51,10 @@ async def check_api_limit(api_name: str) -> bool:
         return True
 
 async def _get_cached_address_data(address: str, testnet: bool) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """
+    Получает кешированные данные адреса
+    Returns: (cached_data, from_cache)
+    """
     async with _cache_lock:
         cache_key = f"{address}_{testnet}"
         if cache_key in _address_cache:
@@ -61,15 +67,78 @@ async def _get_cached_address_data(address: str, testnet: bool) -> Tuple[Optiona
     return None, False
 
 async def _set_cached_address_data(address: str, testnet: bool, data: Dict[str, Any]):
+    """Сохраняет данные адреса в кеш"""
     async with _cache_lock:
         cache_key = f"{address}_{testnet}"
         _address_cache[cache_key] = (data, time.time())
         logger.debug(f"Cached data for address {address}")
 
+async def get_utxo_for_address(address: str, testnet: bool = False) -> List[Dict[str, Any]]:
+    """
+    Получает список неизрасходованных выходов (UTXO) для адреса через litecoinspace.org API
+    Returns: Список UTXO
+    """
+    if not await check_api_limit('litecoinspace'):
+        return []
+        
+    if testnet:
+        logger.warning("Litecoinspace.org does not support testnet")
+        return []
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://litecoinspace.org/api/address/{address}/utxo"
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
+                if response.status == 200:
+                    utxos = await response.json()
+                    
+                    # Добавляем информацию о подтверждениях
+                    for utxo in utxos:
+                        utxo['confirmations'] = utxo.get('confirmations', 0)
+                        utxo['is_confirmed'] = utxo['confirmations'] >= MIN_CONFIRMATIONS
+                    
+                    logger.info(f"Retrieved {len(utxos)} UTXOs for address {address}")
+                    return utxos
+                else:
+                    logger.warning(f"Litecoinspace UTXO API returned status {response.status}")
+                    return []
+    except Exception as e:
+        logger.error(f"Error fetching UTXO for {address}: {e}")
+        return []
+
+async def check_double_spend(address: str, utxos: List[Dict[str, Any]]) -> bool:
+    """
+    Проверяет, не были ли выходы уже использованы в других транзакциях
+    Returns: True если обнаружено двойное расходование
+    """
+    try:
+        # Получаем актуальные UTXO с узла
+        current_utxos = await get_utxo_for_address(address)
+        current_utxo_ids = {f"{utxo['txid']}:{utxo['vout']}" for utxo in current_utxos}
+        
+        # Проверяем, все ли наши UTXO еще действительны
+        for utxo in utxos:
+            utxo_id = f"{utxo['txid']}:{utxo['vout']}"
+            if utxo_id not in current_utxo_ids:
+                logger.warning(f"Double spend detected for UTXO {utxo_id}")
+                return True  # Обнаружено двойное расходование
+                
+        return False
+    except Exception as e:
+        logger.error(f"Error checking double spend for {address}: {e}")
+        return True  # В случае ошибки считаем, что есть риск
+
+def is_transaction_confirmed(tx_data: Dict[str, Any], min_confirmations: int = MIN_CONFIRMATIONS) -> bool:
+    """
+    Проверяет, имеет ли транзакция достаточное количество подтверждений
+    """
+    confirmations = tx_data.get('confirmations', 0)
+    return confirmations >= min_confirmations
+
 async def check_transaction_litecoinspace_api(address: str, expected_amount: float, testnet: bool = False) -> Optional[Dict[str, Any]]:
     """
     Получает данные по адресу через официальный API litecoinspace.org
-    Возвращает словарь с полями: balance, received, transaction_count
+    Возвращает словарь с полями: balance, received, transaction_count, confirmed_balance, unconfirmed_balance
     """
     if not await check_api_limit('litecoinspace'):
         return None
@@ -79,52 +148,49 @@ async def check_transaction_litecoinspace_api(address: str, expected_amount: flo
         return None
 
     try:
+        # Получаем UTXO для точного расчета баланса
+        utxos = await get_utxo_for_address(address, testnet)
+        
+        # Проверяем на двойное расходование
+        if await check_double_spend(address, utxos):
+            logger.warning(f"Double spend detected for address {address}")
+            return None
+
+        # Вычисляем балансы на основе UTXO
+        total_balance = 0.0
+        confirmed_balance = 0.0
+        unconfirmed_balance = 0.0
+        
+        for utxo in utxos:
+            amount = utxo.get('value', 0)
+            total_balance += amount
+            
+            if is_transaction_confirmed(utxo):
+                confirmed_balance += amount
+            else:
+                unconfirmed_balance += amount
+        
+        # Получаем общую информацию об адресе для дополнительных данных
         async with aiohttp.ClientSession() as session:
-            # Получаем историю транзакций
-            url = f"https://litecoinspace.org/api/address/{address}/txs"
+            url = f"https://litecoinspace.org/api/address/{address}"
             async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
                 if response.status == 200:
-                    transactions = await response.json()
-                    
-                    # Вычисляем общую полученную сумму
-                    total_received = 0
-                    confirmed_txs = 0
-                    current_balance = 0
-                    
-                    for tx in transactions:
-                        # Учитываем как подтвержденные, так и неподтвержденные транзакции
-                        is_confirmed = tx.get('status', {}).get('confirmed', False)
-                        if is_confirmed:
-                            confirmed_txs += 1
-                            
-                        for vout in tx.get('vout', []):
-                            if 'scriptPubKey' in vout and 'addresses' in vout['scriptPubKey']:
-                                if address in vout['scriptPubKey']['addresses']:
-                                    amount = vout.get('value', 0)
-                                    total_received += amount
-                                    
-                                    # Если транзакция подтверждена, добавляем к балансу
-                                    if is_confirmed:
-                                        current_balance += amount
-                    
-                    # Для неподтвержденных транзакций проверяем vin
-                    for tx in transactions:
-                        if not tx.get('status', {}).get('confirmed', False):
-                            for vin in tx.get('vin', []):
-                                if 'prevout' in vin and 'scriptPubKey' in vin['prevout']:
-                                    if address in vin['prevout']['scriptPubKey'].get('addresses', []):
-                                        # Это исходящая транзакция, вычитаем из баланса
-                                        current_balance -= vin['prevout'].get('value', 0)
+                    address_info = await response.json()
                     
                     return {
-                        'balance': current_balance,
-                        'received': total_received,
-                        'transaction_count': confirmed_txs,
-                        'source': 'litecoinspace_api'
+                        'balance': total_balance,
+                        'received': address_info.get('chain_stats', {}).get('funded_txo_sum', 0) / 10**8,
+                        'transaction_count': address_info.get('chain_stats', {}).get('tx_count', 0),
+                        'confirmed_balance': confirmed_balance,
+                        'unconfirmed_balance': unconfirmed_balance,
+                        'utxo_count': len(utxos),
+                        'source': 'litecoinspace_api',
+                        'last_updated': time.time()
                     }
                 else:
-                    logger.warning(f"Litecoinspace API returned status {response.status}")
+                    logger.warning(f"Litecoinspace address API returned status {response.status}")
                     return None
+                    
     except Exception as e:
         logger.error(f"Litecoinspace API error: {e}")
         return None
@@ -155,13 +221,13 @@ async def check_transaction_litecoinspace_html(address: str, expected_amount: fl
                     
                     # Альтернативный поиск, если классы изменились
                     if not balance_element:
-                        balance_td = soup.find('td', text='Final Balance')
+                        balance_td = soup.find('td', text=re.compile(r'Final Balance', re.IGNORECASE))
                         balance_element = balance_td.find_next_sibling('td') if balance_td else None
                     if not received_element:
-                        received_td = soup.find('td', text='Total Received')
+                        received_td = soup.find('td', text=re.compile(r'Total Received', re.IGNORECASE))
                         received_element = received_td.find_next_sibling('td') if received_td else None
                     if not txs_element:
-                        txs_td = soup.find('td', text='No. Transactions')
+                        txs_td = soup.find('td', text=re.compile(r'No\. Transactions', re.IGNORECASE))
                         txs_element = txs_td.find_next_sibling('td') if txs_td else None
                     
                     balance = 0.0
@@ -193,7 +259,10 @@ async def check_transaction_litecoinspace_html(address: str, expected_amount: fl
                         'balance': balance,
                         'received': received,
                         'transaction_count': txs_count,
-                        'source': 'litecoinspace_html'
+                        'confirmed_balance': balance,  # HTML не разделяет подтвержденные/неподтвержденные
+                        'unconfirmed_balance': 0.0,
+                        'source': 'litecoinspace_html',
+                        'last_updated': time.time()
                     }
                 else:
                     logger.error(f"Litecoinspace.org returned status {response.status}")
@@ -203,54 +272,42 @@ async def check_transaction_litecoinspace_html(address: str, expected_amount: fl
 
 async def check_ltc_transaction(address: str, expected_amount: float, testnet: bool = False) -> Tuple[bool, float]:
     """
-    Основная функция проверки транзакции
+    Основная функция проверки транзакции с использованием UTXO-модели
     Возвращает кортеж (найдена_ли_транзакция, текущий_баланс)
     """
     try:
-        cached_data, from_cache = await _get_cached_address_data(address, testnet)
-        if from_cache and cached_data:
-            current_balance = cached_data.get('balance', 0)
-            if current_balance >= expected_amount:
-                logger.info(f"Transaction found in cache for address {address}, balance: {current_balance}")
-                return True, current_balance
-
-        # Сначала пробуем API
+        # Получаем актуальные данные без использования кеша для критически важных проверок
         api_data = await check_transaction_litecoinspace_api(address, expected_amount, testnet)
+        
         if api_data is not None:
-            current_balance = api_data.get('balance', 0)
-            total_received = api_data.get('received', 0)
+            confirmed_balance = api_data.get('confirmed_balance', 0)
+            unconfirmed_balance = api_data.get('unconfirmed_balance', 0)
+            total_balance = confirmed_balance + unconfirmed_balance
             
-            # Если текущий баланс достаточен
-            if current_balance >= expected_amount:
-                logger.info(f"Transaction found via Litecoinspace API: {api_data}")
+            # Проверяем, достаточно ли подтвержденных средств
+            if confirmed_balance >= expected_amount:
+                logger.info(f"Sufficient confirmed balance: {confirmed_balance} >= {expected_amount}")
                 await _set_cached_address_data(address, testnet, api_data)
-                return True, current_balance
+                return True, total_balance
             
-            # Если общая полученная сумма достаточна, но баланс меньше (возможно, часть средств отправлена)
-            if total_received >= expected_amount:
-                logger.info(f"Total received amount sufficient: {total_received}, but current balance: {current_balance}")
-                # Возвращаем текущий баланс, чтобы бот мог решить, что делать
+            # Если неподтвержденных средств достаточно, но подтвержденных нет
+            if total_balance >= expected_amount:
+                logger.info(f"Unconfirmed transaction found: {api_data}")
                 await _set_cached_address_data(address, testnet, api_data)
-                return False, current_balance
+                return False, total_balance
 
-        # Если API не сработал или сумма недостаточна, пробуем парсинг HTML
+        # Если API не сработал, пробуем парсинг HTML
         html_data = await check_transaction_litecoinspace_html(address, expected_amount, testnet)
         if html_data is not None:
-            current_balance = html_data.get('balance', 0)
-            total_received = html_data.get('received', 0)
+            total_balance = html_data.get('balance', 0)
             
-            if current_balance >= expected_amount:
+            if total_balance >= expected_amount:
                 logger.info(f"Transaction found via Litecoinspace HTML: {html_data}")
                 await _set_cached_address_data(address, testnet, html_data)
-                return True, current_balance
-                
-            if total_received >= expected_amount:
-                logger.info(f"Total received amount sufficient: {total_received}, but current balance: {current_balance}")
-                await _set_cached_address_data(address, testnet, html_data)
-                return False, current_balance
+                return True, total_balance
             
-        logger.info(f"No transaction found with expected amount. Current balance: {current_balance if 'current_balance' in locals() else 0}")
-        return False, current_balance if 'current_balance' in locals() else 0
+        logger.info(f"No transaction found with expected amount. Current balance: {total_balance if 'total_balance' in locals() else 0}")
+        return False, total_balance if 'total_balance' in locals() else 0
     except Exception as e:
         logger.error(f"Error checking LTC transaction: {e}")
     
@@ -295,6 +352,8 @@ async def _websocket_message_handler():
                 # Обрабатываем разные типы сообщений
                 if 'block' in data:
                     logger.info(f"New block: {data['block']['height']}")
+                    # При новом блоке очищаем кеш, так балансы могли измениться
+                    await cleanup_cache()
                 elif 'mempoolInfo' in data:
                     logger.debug(f"Mempool info: {data['mempoolInfo']}")
                 elif 'transactions' in data:
@@ -305,10 +364,10 @@ async def _websocket_message_handler():
                     # Обработка транзакций связанных с отслеживаемыми адресами
                     for tx in data['address-transactions']:
                         logger.info(f"New transaction for tracked address: {tx['txid']}")
-                elif 'block-transactions' in data:
-                    # Обработка подтвержденных транзакций
-                    for tx in data['block-transactions']:
-                        logger.info(f"Block confirmed transaction: {tx['txid']}")
+                        # Очищаем кеш для этого адреса
+                        for cache_key in list(_address_cache.keys()):
+                            if tx['address'] in cache_key:
+                                del _address_cache[cache_key]
                     
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 logger.error("WebSocket error occurred")
@@ -320,7 +379,8 @@ async def _websocket_message_handler():
     except Exception as e:
         logger.error(f"WebSocket message handler error: {e}")
     finally:
-        _websocket = None
+        async with _websocket_lock:
+            _websocket = None
 
 async def track_address(address: str):
     """Подписывается на отслеживание транзакций для указанного адреса"""
@@ -566,4 +626,36 @@ def get_key_usage_stats() -> Dict[str, Any]:
         "rate_cache_size": len(_rate_cache),
         "websocket_connected": _websocket is not None and not _websocket.closed,
         "tracked_addresses_count": len(_tracked_addresses)
-        }
+    }
+
+async def check_websocket_health() -> bool:
+    """
+    Проверяет здоровье WebSocket соединения
+    Returns: True если соединение активно
+    """
+    global _websocket
+    if _websocket is None or _websocket.closed:
+        return False
+    
+    try:
+        # Отправляем ping для проверки соединения
+        await _websocket.ping()
+        return True
+    except Exception as e:
+        logger.error(f"WebSocket health check failed: {e}")
+        async with _websocket_lock:
+            _websocket = None
+        return False
+
+async def reconnect_websocket():
+    """Переподключает WebSocket соединение"""
+    global _websocket
+    async with _websocket_lock:
+        if _websocket is not None:
+            try:
+                await _websocket.close()
+            except Exception:
+                pass
+            _websocket = None
+    
+    await init_websocket()

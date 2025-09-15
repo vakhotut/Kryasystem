@@ -4,6 +4,7 @@ import asyncio
 from typing import Optional, Dict, Any, Tuple
 import os
 import time
+import re
 import json
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ TESTNET = os.getenv('TESTNET', 'False').lower() == 'true'
 
 # Кеши
 _rate_cache = {}
+_address_cache = {}
 _cache_lock = asyncio.Lock()
 RATE_CACHE_TTL = 30  # Время жизни кеша курсов в секундах
 
@@ -41,6 +43,92 @@ async def check_api_limit(api_name: str) -> bool:
         logger.error(f"Error checking API limit for {api_name}: {e}")
         return True
 
+async def _get_cached_address_data(address: str, testnet: bool) -> Tuple[Optional[Dict[str, Any]], bool]:
+    async with _cache_lock:
+        cache_key = f"{address}_{testnet}"
+        if cache_key in _address_cache:
+            cached_data, timestamp = _address_cache[cache_key]
+            if time.time() - timestamp < CACHE_TTL:
+                logger.debug(f"Using cached data for address {address}")
+                return cached_data, True
+            else:
+                del _address_cache[cache_key]
+    return None, False
+
+async def _set_cached_address_data(address: str, testnet: bool, data: Dict[str, Any]):
+    async with _cache_lock:
+        cache_key = f"{address}_{testnet}"
+        _address_cache[cache_key] = (data, time.time())
+        logger.debug(f"Cached data for address {address}")
+
+async def check_transaction_litecoinspace(address: str, expected_amount: float, testnet: bool = False) -> Optional[Dict[str, Any]]:
+    """
+    Получает данные по адресу с litecoinspace.org (парсит публичную страницу)
+    Возвращает словарь с полями: balance, received, transaction_count (если найдено)
+    """
+    if not await check_api_limit('litecoinspace'):
+        return None
+        
+    if testnet:
+        logger.warning("Litecoinspace.org does not support testnet")
+        return None
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://litecoinspace.org/address/{address}"
+            async with session.get(url, timeout=API_REQUEST_TIMEOUT) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    
+                    # Парсим HTML для извлечения данных
+                    balance_match = re.search(r'Final Balance.*?([\d.]+)\s*LTC', html, re.DOTALL)
+                    received_match = re.search(r'Total Received.*?([\d.]+)\s*LTC', html, re.DOTALL)
+                    txs_match = re.search(r'No\. Transactions.*?(\d+)', html, re.DOTALL)
+                    
+                    if balance_match and received_match and txs_match:
+                        balance = float(balance_match.group(1))
+                        received = float(received_match.group(1))
+                        txs_count = int(txs_match.group(1))
+                        
+                        return {
+                            'balance': balance,
+                            'received': received,
+                            'transaction_count': txs_count
+                        }
+                    else:
+                        logger.error("Failed to parse data from litecoinspace.org")
+                else:
+                    logger.error(f"Litecoinspace.org returned status {response.status}")
+    except Exception as e:
+        logger.error(f"Litecoinspace.org API error: {e}")
+    return None
+
+async def check_ltc_transaction(address: str, expected_amount: float, testnet: bool = False) -> bool:
+    """
+    Основная функция проверки транзакции - использует только litecoinspace.org
+    Кеширует результаты в памяти на CACHE_TTL секунд.
+    """
+    try:
+        cached_data, from_cache = await _get_cached_address_data(address, testnet)
+        if from_cache and cached_data and cached_data.get('received', 0) >= expected_amount:
+            logger.info(f"Transaction found in cache for address {address}")
+            return True
+
+        data = await check_transaction_litecoinspace(address, expected_amount, testnet)
+        if data and data.get('received', 0) >= expected_amount:
+            logger.info(f"Transaction found via litecoinspace.org: {data}")
+            await _set_cached_address_data(address, testnet, data)
+            return True
+            
+        logger.info("No transaction found with expected amount")
+        return False
+    except Exception as e:
+        logger.error(f"Error checking LTC transaction: {e}")
+    
+    logger.info("No transaction found with expected amount")
+    return False
+
+# Функции для получения курса LTC (оставлены без изменений)
 async def get_binance_ltc_rate(symbol: str = 'LTCUSDT') -> Optional[float]:
     """Получение курса LTC от Binance API"""
     if not await check_api_limit('binance'):
@@ -214,9 +302,18 @@ async def get_ltc_usd_rate() -> float:
         return 117.0
 
 async def cleanup_cache():
-    """Очистка устаревших записей в кеше курсов"""
+    """Очистка устаревших записей в кеше"""
     async with _cache_lock:
         current_time = time.time()
+        keys_to_delete = []
+        for key, (data, timestamp) in _address_cache.items():
+            if current_time - timestamp > CACHE_TTL:
+                keys_to_delete.append(key)
+        for key in keys_to_delete:
+            del _address_cache[key]
+            logger.debug(f"Removed expired cache entry for key: {key}")
+        
+        # Также очищаем кеш курсов
         rate_keys_to_delete = []
         for key, (rate, timestamp) in _rate_cache.items():
             if current_time - timestamp > RATE_CACHE_TTL:
@@ -227,7 +324,8 @@ async def cleanup_cache():
             logger.debug(f"Removed expired rate cache entry for key: {key}")
 
 def get_key_usage_stats() -> Dict[str, Any]:
-    """Статистика использования API ключей и кешей"""
+    """Минимальная статистика (удалены все внешние explorer-ключи)"""
     return {
+        "cache_size": len(_address_cache),
         "rate_cache_size": len(_rate_cache)
                         }

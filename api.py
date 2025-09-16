@@ -2,7 +2,7 @@
 import aiohttp
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple, Any  # Добавлен Any
+from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 import time
 from db import db_connection, update_user, add_generated_address, update_address_balance
@@ -555,6 +555,11 @@ async def monitor_unconfirmed_transactions():
                 )
             
             for tx in pending_txs:
+                # Проверяем, что crypto_amount не None
+                if tx['crypto_amount'] is None:
+                    logger.error(f"Transaction {tx['order_id']} has None crypto_amount. Skipping.")
+                    continue
+                    
                 # Проверяем статус каждой транзакции
                 tx_check = await check_ltc_transaction_enhanced(
                     tx['crypto_address'], 

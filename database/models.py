@@ -279,6 +279,13 @@ async def init_tables():
             )
             ''')
             
+            # Проверяем и добавляем столбец user_id если его нет
+            try:
+                await conn.execute("SELECT user_id FROM generated_addresses LIMIT 1")
+            except Exception:
+                await conn.execute('ALTER TABLE generated_addresses ADD COLUMN user_id BIGINT REFERENCES users(user_id)')
+                logger.info("Added user_id column to generated_addresses table")
+            
             # Таблица для депозитов
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS deposits (

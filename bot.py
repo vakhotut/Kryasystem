@@ -744,7 +744,7 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
             InlineKeyboardButton(text="👨‍💻 Оператор", url=get_bot_setting('operator_link')),
             InlineKeyboardButton(text="🔧 Техподдержка", url=get_bot_setting('support_link'))
         )
-                builder.row(InlineKeyboardButton(text="📢 Наш канал", url=get_bot_setting('channel_link')))
+        builder.row(InlineKeyboardButton(text="📢 Наш канал", url=get_bot_setting('channel_link')))
         builder.row(InlineKeyboardButton(text="⭐ Отзывы", url=get_bot_setting('reviews_link')))
         builder.row(InlineKeyboardButton(text="🌐 Наш сайт", url=get_bot_setting('website_link')))
         builder.row(InlineKeyboardButton(text="🌐 Смена языка", callback_data="change_language"))

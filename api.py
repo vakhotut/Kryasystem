@@ -5,7 +5,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import time
-from db import db_pool, update_user, add_generated_address, update_address_balance
+from db import db_connection, update_user, add_generated_address, update_address_balance
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ async def monitor_deposits():
 async def get_all_tracked_addresses():
     """Получение всех отслеживаемых адресов из базы данных"""
     try:
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             return await conn.fetch("SELECT * FROM generated_addresses WHERE balance = 0 OR balance IS NULL")
     except Exception as e:
         logger.error(f"Error getting tracked addresses: {e}")
@@ -182,7 +182,7 @@ async def get_all_tracked_addresses():
 async def is_transaction_processed(txid: str) -> bool:
     """Проверка, была ли уже обработана транзакция"""
     try:
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             count = await conn.fetchval("SELECT COUNT(*) FROM deposits WHERE txid = $1", txid)
             return count > 0
     except Exception as e:
@@ -192,7 +192,7 @@ async def is_transaction_processed(txid: str) -> bool:
 async def register_deposit(txid: str, address: str, user_id: int, amount_ltc: float, confirmations: int, status: str):
     """Регистрация депозита в базе данных"""
     try:
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             # Получаем курс LTC для конвертации в USD
             ltc_rate = await get_ltc_usd_rate()
             amount_usd = amount_ltc * ltc_rate
@@ -215,7 +215,7 @@ async def register_deposit(txid: str, address: str, user_id: int, amount_ltc: fl
 async def process_confirmed_deposit(txid: str, user_id: int, amount_ltc: float):
     """Обработка подтвержденного депозита - зачисление средств на баланс пользователя"""
     try:
-        async with db_pool.acquire() as conn:
+        async with db_connection() as conn:
             # Получаем информацию о депозите
             deposit = await conn.fetchrow("SELECT * FROM deposits WHERE txid = $1", txid)
             if not deposit:

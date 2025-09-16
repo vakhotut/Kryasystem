@@ -41,10 +41,10 @@ def log_transaction_event(transaction_id: str, address: str, amount: float,
                          status: str, message: str, level: str = 'INFO'):
     """Структурированное логирование событий транзакций"""
     extra = {
-        'transaction_id': transaction_id,
-        'address': address,
-        'amount': amount,
-        'status': status
+        'transaction_id': transaction_id or 'N/A',
+        'address': address or 'N/A',
+        'amount': amount or 0.0,
+        'status': status or 'UNKNOWN'
     }
     
     if level == 'INFO':
@@ -59,18 +59,30 @@ def log_transaction_event(transaction_id: str, address: str, amount: float,
 def log_address_validation(address: str, is_valid: bool, context: str = ''):
     """Логирование валидации адресов"""
     status = "VALID" if is_valid else "INVALID"
+    extra = {
+        'transaction_id': 'N/A',
+        'address': address,
+        'amount': 0.0,
+        'status': status
+    }
     payment_logger.info(
         f"Address validation: {status} - {address} {context}",
-        extra={'address': address, 'validation_status': status}
+        extra=extra
     )
 
 def log_api_request(api_name: str, success: bool, response_time: float, 
                    details: str = ''):
     """Логирование запросов к API"""
     status = "SUCCESS" if success else "FAILED"
+    extra = {
+        'transaction_id': 'N/A',
+        'address': 'N/A',
+        'amount': 0.0,
+        'status': status
+    }
     payment_logger.info(
         f"API {api_name} request {status} - {response_time:.2f}ms {details}",
-        extra={'api': api_name, 'status': status, 'response_time': response_time}
+        extra=extra
     )
 
 def validate_ltc_address(address: str) -> bool:

@@ -2,7 +2,7 @@
 import aiohttp
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any  # Добавлен Any
 from datetime import datetime, timedelta
 import time
 from db import db_connection, update_user, add_generated_address, update_address_balance

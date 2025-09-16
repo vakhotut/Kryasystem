@@ -38,6 +38,7 @@ from db import (
 )
 from ltc_hdwallet import ltc_wallet
 from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats, monitor_deposits, get_confirmations_count
+from api import check_ltc_transaction_enhanced, validate_ltc_address, log_transaction_event
 
 # Настройки логирования
 logging.basicConfig(
@@ -743,7 +744,7 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_id: int
             InlineKeyboardButton(text="👨‍💻 Оператор", url=get_bot_setting('operator_link')),
             InlineKeyboardButton(text="🔧 Техподдержка", url=get_bot_setting('support_link'))
         )
-        builder.row(InlineKeyboardButton(text="📢 Наш канал", url=get_bot_setting('channel_link')))
+                builder.row(InlineKeyboardButton(text="📢 Наш канал", url=get_bot_setting('channel_link')))
         builder.row(InlineKeyboardButton(text="⭐ Отзывы", url=get_bot_setting('reviews_link')))
         builder.row(InlineKeyboardButton(text="🌐 Наш сайт", url=get_bot_setting('website_link')))
         builder.row(InlineKeyboardButton(text="🌐 Смена языка", callback_data="change_language"))
@@ -1087,7 +1088,12 @@ async def process_topup_currency(callback: types.CallbackQuery, state: FSMContex
             index = address_data['index']
             
             # Сохраняем адрес в базу данных
-            await add_generated_address(address, index, user_id, "Balance topup")
+            await add_generated_address(
+                address=address,
+                index=index,
+                user_id=user_id,
+                label="Balance topup"
+            )
             
             # Получаем курс LTC
             ltc_rate = await get_ltc_usd_rate_cached()
@@ -1794,14 +1800,24 @@ async def check_invoice_after_delay(order_id, user_id, lang):
         )
     
     if invoice and invoice['status'] == 'pending':
-        is_paid = await check_ltc_transaction(
+        # Используем улучшенную проверку транзакций
+        tx_check = await check_ltc_transaction_enhanced(
             invoice['crypto_address'],
             float(invoice['crypto_amount'])
         )
         
-        if is_paid:
+        if tx_check['confirmed'] and tx_check['confirmations'] >= CONFIRMATIONS_REQUIRED:
             await update_transaction_status(order_id, 'completed')
             await process_successful_payment(invoice)
+        elif tx_check['unconfirmed']:
+            # Транзакция есть в мемпуле, но еще не подтверждена
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"⏳ Транзакция обнаружена в мемпуле. Ожидаем подтверждений ({tx_check.get('confirmations', 0)}/{CONFIRMATIONS_REQUIRED})"
+                )
+            except Exception as e:
+                logger.exception("Error sending mempool notification")
         else:
             try:
                 await bot.send_message(
@@ -1903,9 +1919,10 @@ async def process_balance(message: types.Message, state: FSMContext):
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(F.data == "check_invoice")
-async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
+async def check_invoice_enhanced(callback: types.CallbackQuery, state: FSMContext):
+    """Улучшенная проверка инвойса с детальным логированием"""
     try:
-        await callback.answer("Проверка оплаты... Пожалуйста, подождите")
+        await callback.answer("Проверка оплаты...")
         
         user_id = callback.from_user.id
         
@@ -1921,32 +1938,68 @@ async def check_invoice(callback: types.CallbackQuery, state: FSMContext):
                 user_id
             )
         
-        if invoice:
-            is_paid = await check_ltc_transaction(
-                invoice['crypto_address'],
-                float(invoice['crypto_amount'])
+        if not invoice:
+            log_transaction_event(
+                "unknown", "unknown", 0, 
+                "NOT_FOUND", "Active invoice not found", "WARNING"
+            )
+            await callback.message.answer("❌ Активный инвойс не найден")
+            return
+        
+        # Детальная проверка транзакции
+        tx_check = await check_ltc_transaction_enhanced(
+            invoice['crypto_address'], 
+            float(invoice['crypto_amount'])
+        )
+        
+        log_transaction_event(
+            invoice['order_id'], invoice['crypto_address'],
+            float(invoice['crypto_amount']), 
+            "CHECKED", f"Transaction check result: {tx_check}", "INFO"
+        )
+        
+        if tx_check['confirmed'] and tx_check['confirmations'] >= CONFIRMATIONS_REQUIRED:
+            # Обновляем статус транзакции
+            await update_transaction_status(invoice['order_id'], 'completed')
+            await process_successful_payment(invoice)
+            
+            log_transaction_event(
+                invoice['order_id'], invoice['crypto_address'],
+                float(invoice['crypto_amount']), 
+                "CONFIRMED", f"Transaction confirmed with {tx_check['confirmations']} confirmations", "INFO"
             )
             
-            if is_paid:
-                await update_transaction_status(invoice['order_id'], 'completed')
-                await callback.message.answer("✅ Оплата подтверждена! Транзакция обрабатывается.")
-                
-                await process_successful_payment(invoice)
-                
-                try:
-                    await callback.message.edit_caption(
-                        caption="✅ Оплата подтверждена! Транзакция обрабатывается.",
-                        reply_markup=None
-                    )
-                except:
-                    pass
-            else:
-                await callback.message.answer("❌ Оплата еще не получена. Попробуйте позже.")
+            await callback.message.answer("✅ Оплата подтверждена! Транзакция обрабатывается.")
+            
+        elif tx_check['unconfirmed']:
+            # Транзакция есть в mempool, но еще не подтверждена
+            log_transaction_event(
+                invoice['order_id'], invoice['crypto_address'],
+                float(invoice['crypto_amount']), 
+                "UNCONFIRMED", "Transaction is in mempool but not yet confirmed", "INFO"
+            )
+            
+            await callback.message.answer(
+                f"⏳ Транзакция получена, но еще не подтверждена сетью. "
+                f"Ожидаем подтверждений ({tx_check.get('confirmations', 0)}/{CONFIRMATIONS_REQUIRED})"
+            )
+            
         else:
-            await callback.message.answer("❌ Активный инвойс не найден")
+            # Транзакция не найдена
+            log_transaction_event(
+                invoice['order_id'], invoice['crypto_address'],
+                float(invoice['crypto_amount']), 
+                "NOT_FOUND", "Transaction not found in blockchain or mempool", "WARNING"
+            )
+            
+            await callback.message.answer("❌ Транзакция не найдена. Попробуйте позже.")
             
     except Exception as e:
-        logger.exception("Error checking invoice")
+        logger.exception("Error in enhanced invoice check")
+        log_transaction_event(
+            "unknown", "unknown", 0, 
+            "ERROR", f"Exception in invoice check: {str(e)}", "ERROR"
+        )
         await callback.answer("Произошла ошибка. Попробуйте позже.")
 
 @dp.callback_query(F.data == "cancel_invoice")
@@ -2055,6 +2108,10 @@ async def main():
         asyncio.create_task(check_pending_transactions_loop())
         asyncio.create_task(reset_api_limits_loop())
         asyncio.create_task(monitor_deposits())
+        
+        # Запускаем мониторинг неподтвержденных транзакций
+        from api import start_deposit_monitoring
+        start_deposit_monitoring()
         
         while True:
             try:

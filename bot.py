@@ -1331,7 +1331,6 @@ async def process_district(callback: types.CallbackQuery, state: FSMContext):
                 get_cached_text(lang, 'select_delivery'),
                 builder.as_markup(),
                 get_bot_setting('delivery_menu_image'),
-                state
             )
             await state.set_state(Form.delivery)
     except Exception as e:

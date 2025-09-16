@@ -6,6 +6,9 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import time
 from db import db_connection, update_user, add_generated_address, update_address_balance
+import base58
+import hashlib
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +22,132 @@ CONFIRMATIONS_REQUIRED = 3  # Требуемое количество подтв
 transaction_cache = {}
 address_cache = {}
 
+# Конфигурация логирования
+payment_logger = logging.getLogger('payment_system')
+payment_logger.setLevel(logging.INFO)
+
+# Создаем файловый обработчик для детального лога
+file_handler = logging.FileHandler('payment_detailed.log')
+file_handler.setLevel(logging.INFO)
+
+# Создаем форматтер с структурированными данными
+detailed_formatter = logging.Formatter(
+    '%(asctime)s|%(levelname)s|%(message)s|%(transaction_id)s|%(address)s|%(amount)s|%(status)s'
+)
+file_handler.setFormatter(detailed_formatter)
+payment_logger.addHandler(file_handler)
+
+def log_transaction_event(transaction_id: str, address: str, amount: float, 
+                         status: str, message: str, level: str = 'INFO'):
+    """Структурированное логирование событий транзакций"""
+    extra = {
+        'transaction_id': transaction_id,
+        'address': address,
+        'amount': amount,
+        'status': status
+    }
+    
+    if level == 'INFO':
+        payment_logger.info(f"{message} [TX: {transaction_id}]", extra=extra)
+    elif level == 'WARNING':
+        payment_logger.warning(f"{message} [TX: {transaction_id}]", extra=extra)
+    elif level == 'ERROR':
+        payment_logger.error(f"{message} [TX: {transaction_id}]", extra=extra)
+    elif level == 'DEBUG':
+        payment_logger.debug(f"{message} [TX: {transaction_id}]", extra=extra)
+
+def log_address_validation(address: str, is_valid: bool, context: str = ''):
+    """Логирование валидации адресов"""
+    status = "VALID" if is_valid else "INVALID"
+    payment_logger.info(
+        f"Address validation: {status} - {address} {context}",
+        extra={'address': address, 'validation_status': status}
+    )
+
+def log_api_request(api_name: str, success: bool, response_time: float, 
+                   details: str = ''):
+    """Логирование запросов к API"""
+    status = "SUCCESS" if success else "FAILED"
+    payment_logger.info(
+        f"API {api_name} request {status} - {response_time:.2f}ms {details}",
+        extra={'api': api_name, 'status': status, 'response_time': response_time}
+    )
+
+def validate_ltc_address(address: str) -> bool:
+    """
+    Валидация Litecoin адресов различных форматов:
+    - Bech32 (ltc1...)
+    - P2SH (M...)
+    - P2PKH (L...)
+    - Legacy (3...)
+    """
+    # Bech32 адреса (начинаются с ltc1)
+    if address.startswith('ltc1'):
+        # Bech32 адреса обычно имеют длину около 42 символов
+        return 40 <= len(address) <= 62
+    
+    # P2SH адреса (начинаются с M)
+    elif address.startswith('M'):
+        return validate_base58_address(address, 'M')
+    
+    # P2PKH адреса (начинаются с L)
+    elif address.startswith('L'):
+        return validate_base58_address(address, 'L')
+    
+    # Legacy адреса (начинаются с 3)
+    elif address.startswith('3'):
+        return validate_base58_address(address, '3')
+    
+    return False
+
+def validate_base58_address(address: str, expected_prefix: str) -> bool:
+    """Валидация Base58 адресов с проверкой контрольной суммы"""
+    try:
+        # Проверяем префикс
+        if not address.startswith(expected_prefix):
+            return False
+        
+        # Декодируем Base58
+        decoded = base58.b58decode(address)
+        
+        # Проверяем длину
+        if len(decoded) != 25:
+            return False
+        
+        # Разделяем на payload и checksum
+        payload = decoded[:-4]
+        checksum = decoded[-4:]
+        
+        # Вычисляем проверочную сумму
+        first_sha = hashlib.sha256(payload).digest()
+        second_sha = hashlib.sha256(first_sha).digest()
+        calculated_checksum = second_sha[:4]
+        
+        # Сравниваем checksum
+        return checksum == calculated_checksum
+        
+    except Exception:
+        return False
+
 async def get_ltc_usd_rate() -> float:
     """Получение текущего курса LTC к USD"""
     try:
+        start_time = time.time()
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{MEMPOOL_API_URL}/v1/historical?currency=USD") as response:
                 if response.status == 200:
                     data = await response.json()
                     # Получаем последнюю доступную цену
-                    return float(data.get('prices', [])[-1][1] if data.get('prices') else 0)
+                    rate = float(data.get('prices', [])[-1][1] if data.get('prices') else 0)
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_rate', True, response_time, f"Rate: {rate}")
+                    return rate
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('mempool_rate', False, response_time, f"Status: {response.status}")
     except Exception as e:
         logger.error(f"Error getting LTC rate: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('mempool_rate', False, response_time, f"Exception: {str(e)}")
     
     # Возвращаем значение по умолчанию в случае ошибки
     return 65.0  # Примерное значение
@@ -37,32 +155,143 @@ async def get_ltc_usd_rate() -> float:
 async def get_address_transactions(address: str) -> List[Dict]:
     """Получение транзакций для адреса из mempool.space"""
     try:
+        start_time = time.time()
+        
+        # Валидация адреса перед запросом
+        if not validate_ltc_address(address):
+            log_address_validation(address, False, "API request blocked")
+            return []
+            
+        log_address_validation(address, True, "API request")
+        
         base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{base_url}/address/{address}/txs") as response:
                 if response.status == 200:
-                    return await response.json()
+                    transactions = await response.json()
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_address_txs', True, response_time, 
+                                  f"Found {len(transactions)} transactions")
+                    return transactions
                 else:
                     logger.error(f"Error getting transactions for address {address}: {response.status}")
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_address_txs', False, response_time, 
+                                  f"Status: {response.status}")
                     return []
     except Exception as e:
         logger.error(f"Error in get_address_transactions for {address}: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('mempool_address_txs', False, response_time, f"Exception: {str(e)}")
         return []
 
 async def get_transaction(txid: str) -> Optional[Dict]:
     """Получение информации о конкретной транзакции"""
     try:
+        start_time = time.time()
         base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{base_url}/tx/{txid}") as response:
                 if response.status == 200:
-                    return await response.json()
+                    transaction = await response.json()
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_tx', True, response_time, f"TX: {txid}")
+                    return transaction
                 else:
                     logger.error(f"Error getting transaction {txid}: {response.status}")
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_tx', False, response_time, f"Status: {response.status}")
                     return None
     except Exception as e:
         logger.error(f"Error in get_transaction for {txid}: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('mempool_tx', False, response_time, f"Exception: {str(e)}")
         return None
+
+async def check_unconfirmed_transactions(address: str) -> List[Dict]:
+    """Проверка неподтвержденных транзакций через Mempool.space API"""
+    try:
+        start_time = time.time()
+        
+        # Валидация адреса перед запросом
+        if not validate_ltc_address(address):
+            return []
+            
+        base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/address/{address}/txs/mempool") as response:
+                if response.status == 200:
+                    transactions = await response.json()
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_unconfirmed', True, response_time, 
+                                  f"Found {len(transactions)} unconfirmed transactions")
+                    return transactions
+                return []
+    except Exception as e:
+        logger.error(f"Error checking unconfirmed transactions for {address}: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('mempool_unconfirmed', False, response_time, f"Exception: {str(e)}")
+        return []
+
+async def check_ltc_transaction_enhanced(address: str, expected_amount: float) -> Dict[str, Any]:
+    """
+    Улучшенная проверка транзакций с учетом неподтвержденных
+    Возвращает детальную информацию о статусе транзакции
+    """
+    try:
+        start_time = time.time()
+        
+        # Проверяем подтвержденные транзакции
+        confirmed_txs = await get_address_transactions(address)
+        # Проверяем неподтвержденные транзакции
+        unconfirmed_txs = await check_unconfirmed_transactions(address)
+        
+        result = {
+            'confirmed': False,
+            'unconfirmed': False,
+            'confirmations': 0,
+            'amount': 0.0,
+            'txids': []
+        }
+        
+        # Проверяем подтвержденные транзакции
+        for tx in confirmed_txs:
+            for output in tx.get('vout', []):
+                if 'scriptpubkey_address' in output and output['scriptpubkey_address'] == address:
+                    amount_ltc = output['value'] / 100000000
+                    if abs(amount_ltc - expected_amount) < 0.00000001:
+                        result['confirmed'] = True
+                        result['confirmations'] = await get_confirmations_count(tx['txid'])
+                        result['amount'] = amount_ltc
+                        result['txids'].append(tx['txid'])
+        
+        # Проверяем неподтвержденные транзакции
+        for tx in unconfirmed_txs:
+            for output in tx.get('vout', []):
+                if 'scriptpubkey_address' in output and output['scriptpubkey_address'] == address:
+                    amount_ltc = output['value'] / 100000000
+                    if abs(amount_ltc - expected_amount) < 0.00000001:
+                        result['unconfirmed'] = True
+                        result['amount'] = amount_ltc
+                        result['txids'].append(tx['txid'])
+        
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('enhanced_check', True, response_time, 
+                       f"Confirmed: {result['confirmed']}, Unconfirmed: {result['unconfirmed']}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in enhanced LTC transaction check for {address}: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('enhanced_check', False, response_time, f"Exception: {str(e)}")
+        return {
+            'confirmed': False,
+            'unconfirmed': False,
+            'confirmations': 0,
+            'amount': 0.0,
+            'txids': []
+        }
 
 async def check_ltc_transaction(address: str, expected_amount: float) -> bool:
     """
@@ -70,21 +299,8 @@ async def check_ltc_transaction(address: str, expected_amount: float) -> bool:
     Возвращает True если транзакция найдена и имеет достаточное количество подтверждений
     """
     try:
-        transactions = await get_address_transactions(address)
-        
-        for tx in transactions:
-            # Проверяем выходы транзакции на наш адрес
-            for output in tx.get('vout', []):
-                if 'scriptpubkey_address' in output and output['scriptpubkey_address'] == address:
-                    amount_ltc = output['value'] / 100000000  # Конвертация из сатоши
-                    
-                    # Проверяем совпадение суммы и достаточность подтверждений
-                    if abs(amount_ltc - expected_amount) < 0.00000001 and tx['status']['confirmed']:
-                        confirmations = await get_confirmations_count(tx['txid'])
-                        if confirmations >= CONFIRMATIONS_REQUIRED:
-                            return True
-        
-        return False
+        tx_check = await check_ltc_transaction_enhanced(address, expected_amount)
+        return tx_check['confirmed'] and tx_check['confirmations'] >= CONFIRMATIONS_REQUIRED
     except Exception as e:
         logger.error(f"Error checking LTC transaction for address {address}: {e}")
         return False
@@ -106,16 +322,24 @@ async def get_confirmations_count(txid: str) -> int:
 async def get_best_block_height() -> Optional[int]:
     """Получение высоты последнего блока"""
     try:
+        start_time = time.time()
         base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{base_url}/blocks/tip/height") as response:
                 if response.status == 200:
-                    return int(await response.text())
+                    height = int(await response.text())
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_height', True, response_time, f"Height: {height}")
+                    return height
                 else:
                     logger.error(f"Error getting best block height: {response.status}")
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_height', False, response_time, f"Status: {response.status}")
                     return None
     except Exception as e:
         logger.error(f"Error in get_best_block_height: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('mempool_height', False, response_time, f"Exception: {str(e)}")
         return None
 
 async def monitor_deposits():
@@ -208,9 +432,20 @@ async def register_deposit(txid: str, address: str, user_id: int, amount_ltc: fl
             # Обновляем баланс адреса
             await update_address_balance(address, amount_ltc, 1)  # 1 транзакция
             
-            logger.info(f"Registered deposit: {txid} for user {user_id}, amount: {amount_ltc} LTC")
+            log_transaction_event(
+                txid, address, amount_ltc, 
+                "DEPOSIT_REGISTERED", 
+                f"Deposit registered for user {user_id} with {confirmations} confirmations", 
+                "INFO"
+            )
     except Exception as e:
         logger.error(f"Error registering deposit: {e}")
+        log_transaction_event(
+            txid, address, amount_ltc, 
+            "DEPOSIT_ERROR", 
+            f"Error registering deposit: {str(e)}", 
+            "ERROR"
+        )
 
 async def process_confirmed_deposit(txid: str, user_id: int, amount_ltc: float):
     """Обработка подтвержденного депозита - зачисление средств на баланс пользователя"""
@@ -233,6 +468,13 @@ async def process_confirmed_deposit(txid: str, user_id: int, amount_ltc: float):
                 txid
             )
             
+            log_transaction_event(
+                txid, deposit['address'], amount_ltc, 
+                "DEPOSIT_PROCESSED", 
+                f"Deposit processed for user {user_id}, amount: {deposit['amount_usd']} USD", 
+                "INFO"
+            )
+            
             # Отправляем уведомление пользователю
             try:
                 from bot import bot
@@ -249,9 +491,14 @@ async def process_confirmed_deposit(txid: str, user_id: int, amount_ltc: float):
             except Exception as e:
                 logger.error(f"Error sending deposit notification: {e}")
             
-            logger.info(f"Processed confirmed deposit: {txid} for user {user_id}")
     except Exception as e:
         logger.error(f"Error processing confirmed deposit: {e}")
+        log_transaction_event(
+            txid, "unknown", amount_ltc, 
+            "DEPOSIT_PROCESS_ERROR", 
+            f"Error processing confirmed deposit: {str(e)}", 
+            "ERROR"
+        )
 
 async def get_address_balance(address: str) -> Tuple[float, int]:
     """
@@ -259,6 +506,7 @@ async def get_address_balance(address: str) -> Tuple[float, int]:
     Возвращает (balance, transaction_count)
     """
     try:
+        start_time = time.time()
         base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{base_url}/address/{address}") as response:
@@ -267,12 +515,19 @@ async def get_address_balance(address: str) -> Tuple[float, int]:
                     balance = data['chain_stats']['funded_txo_sum'] - data['chain_stats']['spent_txo_sum']
                     balance_ltc = balance / 100000000  # Конвертация из сатоши
                     tx_count = data['chain_stats']['tx_count'] + data['mempool_stats']['tx_count']
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_balance', True, response_time, 
+                                  f"Balance: {balance_ltc}, TX count: {tx_count}")
                     return balance_ltc, tx_count
                 else:
                     logger.error(f"Error getting address balance for {address}: {response.status}")
+                    response_time = (time.time() - start_time) * 1000
+                    log_api_request('mempool_balance', False, response_time, f"Status: {response.status}")
                     return 0, 0
     except Exception as e:
         logger.error(f"Error in get_address_balance for {address}: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_request('mempool_balance', False, response_time, f"Exception: {str(e)}")
         return 0, 0
 
 async def get_key_usage_stats() -> Dict[str, any]:
@@ -289,7 +544,67 @@ async def get_key_usage_stats() -> Dict[str, any]:
         }
     }
 
+async def monitor_unconfirmed_transactions():
+    """Фоновая задача для мониторинга неподтвержденных транзакций"""
+    while True:
+        try:
+            # Получаем все ожидающие транзакции
+            async with db_connection() as conn:
+                pending_txs = await conn.fetch(
+                    "SELECT * FROM transactions WHERE status = 'pending'"
+                )
+            
+            for tx in pending_txs:
+                # Проверяем статус каждой транзакции
+                tx_check = await check_ltc_transaction_enhanced(
+                    tx['crypto_address'], 
+                    float(tx['crypto_amount'])
+                )
+                
+                if tx_check['confirmed'] and tx_check['confirmations'] >= CONFIRMATIONS_REQUIRED:
+                    # Транзакция подтверждена
+                    await update_transaction_status(tx['order_id'], 'completed')
+                    await process_successful_payment(tx)
+                    
+                    log_transaction_event(
+                        tx['order_id'], tx['crypto_address'],
+                        float(tx['crypto_amount']), 
+                        "CONFIRMED", 
+                        f"Transaction confirmed via monitoring with {tx_check['confirmations']} confirmations", 
+                        "INFO"
+                    )
+                    
+                elif tx_check['unconfirmed']:
+                    # Транзакция все еще в mempool
+                    log_transaction_event(
+                        tx['order_id'], tx['crypto_address'],
+                        float(tx['crypto_amount']), 
+                        "MONITORED", 
+                        f"Transaction still in mempool with {tx_check.get('confirmations', 0)} confirmations", 
+                        "DEBUG"
+                    )
+                
+                # Если транзакция не найдена ни в блокчейне, ни в mempool,
+                # и прошло больше времени чем ожидалось, помечаем как проблемную
+                elif not tx_check['unconfirmed'] and not tx_check['confirmed']:
+                    created_at = tx['created_at']
+                    if (datetime.now() - created_at).total_seconds() > 3600:  # 1 час
+                        log_transaction_event(
+                            tx['order_id'], tx['crypto_address'],
+                            float(tx['crypto_amount']), 
+                            "STALE", 
+                            "Transaction not found in blockchain or mempool for over 1 hour", 
+                            "WARNING"
+                        )
+            
+            await asyncio.sleep(300)  # Проверяем каждые 5 минут
+            
+        except Exception as e:
+            logger.exception("Error in unconfirmed transactions monitoring")
+            await asyncio.sleep(60)
+
 # Запуск фоновой задачи мониторинга
 def start_deposit_monitoring():
     """Запуск задачи мониторинга депозитов"""
     asyncio.create_task(monitor_deposits())
+    asyncio.create_task(monitor_unconfirmed_transactions())

@@ -78,7 +78,7 @@ class Form(StatesGroup):
 bot = Bot(token=TOKEN, timeout=30)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-db_pool = None
+db_conn_pool = None
 invoice_notifications = {}
 
 # Глобальные переменные для настроек
@@ -1806,7 +1806,7 @@ async def check_invoice_after_delay(order_id, user_id, lang):
             try:
                 await bot.send_message(
                     user_id,
-                    "⏰ Время оплаты истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
+                    "⏰ Время оплата истекло. Если вы уже отправили средства, они будут зачислены после подтверждения сети."
                 )
             except Exception as e:
                 logger.exception("Error sending delay notification")
@@ -2035,8 +2035,6 @@ async def main():
         logger.error("Another instance is already running. Exiting.")
         return
     
-    global db_pool
-    
     try:
         max_retries = 5
         for attempt in range(max_retries):
@@ -2051,7 +2049,7 @@ async def main():
         
         await asyncio.sleep(1)
         
-        db_pool = await init_db(DATABASE_URL)
+        await init_db(DATABASE_URL)
         await load_cache()
         
         asyncio.create_task(check_pending_transactions_loop())
@@ -2076,9 +2074,6 @@ async def main():
                 
     except Exception as e:
         logger.exception("Failed to start bot")
-    finally:
-        if db_pool:
-            await db_pool.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

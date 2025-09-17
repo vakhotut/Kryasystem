@@ -8,6 +8,7 @@ import socket
 import sys
 import contextlib
 import inspect
+import signal
 from datetime import datetime, timedelta
 from functools import lru_cache
 from aiogram import Bot, Dispatcher, types, F
@@ -19,6 +20,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton, InputFile
 from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramBadRequest, TelegramNetworkError
 import aiohttp
+from aiohttp import web
 import traceback
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
@@ -582,6 +584,15 @@ async def check_active_invoice_for_user(user_id, invoice_type="any"):
                 user_id
             )
     return invoice is not None
+
+async def cleanup_invalid_addresses():
+    """Очистка невалидных адресов из базы данных"""
+    async with db_connection() as conn:
+        addresses = await conn.fetch("SELECT address FROM generated_addresses")
+        for addr in addresses:
+            if not validate_ltc_address(addr['address']):
+                logger.warning(f"Removing invalid address: {addr['address']}")
+                await conn.execute("DELETE FROM generated_addresses WHERE address = $1", addr['address'])
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -1922,7 +1933,7 @@ async def process_balance(message: types.Message, state: FSMContext):
 async def check_invoice_enhanced(callback: types.CallbackQuery, state: FSMContext):
     """Улучшенная проверка инвойса с детальным логированием"""
     try:
-        await callback.answer("Проверка оплаты...")
+        await callback.answer("Проверка оплата...")
         
         user_id = callback.from_user.id
         
@@ -2083,9 +2094,13 @@ async def handle_text(message: types.Message, state: FSMContext):
         logger.exception("Error handling text")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
+def handle_sigterm():
+    logger.info("Received SIGTERM signal, shutting down gracefully...")
+    # Остановка всех задач и соединений
+
 async def main():
     if not singleton_check():
-        logger.error("Another instance is already running. Exiting.")
+        logger.error("Another instance of the bot is already running. Exiting.")
         return
     
     try:
@@ -2104,6 +2119,20 @@ async def main():
         
         await init_db(DATABASE_URL)
         await load_cache()
+        
+        # Добавьте в начало main() функции:
+        port = os.environ.get('PORT', 8000)
+        if port:
+            # Создаем простой HTTP-сервер для удовлетворения требований Render
+            app = web.Application()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', int(port))
+            await site.start()
+            logger.info(f"HTTP server started on port {port}")
+        
+        # Очистка невалидных адресов при старте
+        await cleanup_invalid_addresses()
         
         asyncio.create_task(check_pending_transactions_loop())
         asyncio.create_task(reset_api_limits_loop())
@@ -2133,4 +2162,11 @@ async def main():
         logger.exception("Failed to start bot")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()

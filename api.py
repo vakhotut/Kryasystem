@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 PRIMARY_API_URL = "https://ltc.bitaps.com"
 FALLBACK_API_URL = "https://api.litecoinspace.org"
 LTC_NETWORK = "mainnet"
-CONFIRMATIONS_REQUIRED = 3
+CONFIRMATIONS_REQUIRED = 3  # Требуемое количество подтверждений
 
 # Кэш для хранения данных о транзакциях
 transaction_cache = {}
@@ -356,6 +356,17 @@ async def process_confirmed_deposit(txid: str, user_id: int, amount_ltc: float):
                 txid
             )
             
+            # Дополнительно: обновляем статус соответствующего инвойса
+            invoice = await conn.fetchrow(
+                "SELECT * FROM transactions WHERE crypto_address = $1 AND crypto_amount = $2 AND status = 'pending'",
+                deposit['address'], deposit['amount_ltc']
+            )
+            if invoice:
+                await conn.execute(
+                    "UPDATE transactions SET status = 'completed' WHERE order_id = $1",
+                    invoice['order_id']
+                )
+            
             log_transaction_event(
                 txid, deposit['address'], amount_ltc, 
                 "DEPOSIT_PROCESSED", 
@@ -490,7 +501,7 @@ async def get_address_balance(address: str) -> Tuple[float, int]:
                         log_api_request('litecoinspace_balance', True, response_time, 
                                       f"Balance: {balance}, TX count: {tx_count}")
                         return balance, tx_count
-        except Exception as fallback_error:
+                except Exception as fallback_error:
             logger.error(f"Litecoinspace balance error: {fallback_error}")
             response_time = (time.time() - start_time_fallback) * 1000
             log_api_request('litecoinspace_balance', False, response_time, f"Exception: {str(fallback_error)}")
@@ -509,6 +520,27 @@ async def get_key_usage_stats() -> Dict[str, any]:
             "remaining_daily_requests": float('inf')
         }
     }
+
+# Кэш для хранения курса LTC
+_cached_rate = None
+_cached_rate_time = 0
+CACHE_DURATION = 300  # 5 минут
+
+async def get_cached_rate() -> Tuple[float, bool]:
+    """Получение кэшированного курса LTC"""
+    global _cached_rate, _cached_rate_time
+    current_time = time.time()
+    
+    if _cached_rate and (current_time - _cached_rate_time) < CACHE_DURATION:
+        return _cached_rate, True
+    
+    try:
+        _cached_rate = await get_ltc_usd_rate()
+        _cached_rate_time = current_time
+        return _cached_rate, False
+    except Exception as e:
+        logger.error(f"Error getting cached rate: {e}")
+        return 65.0, False  # Fallback value
 
 # Запуск фоновых задач мониторинга
 def start_deposit_monitoring():

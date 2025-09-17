@@ -38,7 +38,7 @@ from db import (
     add_generated_address, update_address_balance, get_deposit_address, create_deposit, update_deposit_confirmations
 )
 from ltc_hdwallet import ltc_wallet
-from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats, monitor_deposits, get_confirmations_count
+from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats, monitor_deposits
 from api import check_ltc_transaction_enhanced, validate_ltc_address, log_transaction_event
 
 # Импортируем сцены и состояния

@@ -119,7 +119,7 @@ def generate_captcha_image(text):
 def singleton_check():
     try:
         test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        test_socket.bind("127.0.0.1", 17891))
+        test_socket.bind(("127.0.0.1", 17891))
         test_socket.close()
         return True
     except socket.error:

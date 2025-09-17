@@ -18,9 +18,10 @@ class Form(StatesGroup):
     balance = State()
     balance_menu = State()
     topup_currency = State()
-    topup_amount = State()  # Новое состояние для ввода суммы пополнения
+    topup_amount = State()
     order_history = State()
     deposit_address = State()
+    invoice_check = State()
 
 # Текстовые константы
 TEXTS = {
@@ -54,6 +55,7 @@ TEXTS = {
         'error': 'Произошла ошибка. Попробуйте позже.',
         'no_orders': 'У вас нет заказов.',
         'bonuses': 'Бонусная система:\n- За каждого приглашенного друга: 5% кэшбэк\n- Накопительная скидка до 15%',
+        'only_ltc_supported': 'В настоящее время поддерживается только LTC',
     },
     'en': {
         'welcome': 'Welcome!',
@@ -85,6 +87,7 @@ TEXTS = {
         'error': 'An error occurred. Please try again later.',
         'no_orders': 'You have no orders.',
         'bonuses': 'Bonus system:\n- For each invited friend: 5% cashback\n- Accumulative discount up to 15%',
+        'only_ltc_supported': 'Currently only LTC is supported',
     },
     'ka': {
         'welcome': 'მოგესალმებით!',
@@ -116,6 +119,7 @@ TEXTS = {
         'error': 'მოხდა შეცდომა. გთხოვთ, სცადოთ მოგვიანებით.',
         'no_orders': 'თქვენ არ გაქვთ შეკვეთები.',
         'bonuses': 'ბონუს სისტემა:\n- ყოველი მოწვეული მეგობრისთვის: 5% cashback\n- დაგროვებითი ფასდაკლება 15%-მდე',
+        'only_ltc_supported': 'Currently only LTC is supported',
     }
 }
 
@@ -264,7 +268,6 @@ def get_text(lang, key, **kwargs):
     return text.format(**kwargs) if kwargs else text
 
 def get_bot_setting(key):
-    # Эта функция должна быть реализована в основном файле bot.py
-    # Здесь мы просто возвращаем заглушку, чтобы избежать ошибок импорта
+    # Импортируем здесь, чтобы избежать циклических импортов
     from bot import BOT_SETTINGS
     return BOT_SETTINGS.get(key, "")

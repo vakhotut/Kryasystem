@@ -96,7 +96,12 @@ def validate_ltc_address(address: str) -> bool:
     # Bech32 адреса (начинаются с ltc1)
     if address.startswith('ltc1'):
         # Bech32 адреса обычно имеют длину около 42 символов
-        return 40 <= len(address) <= 62
+        if not (40 <= len(address) <= 62):
+            return False
+        # Дополнительная проверка формата Bech32
+        if not re.match(r'^ltc1[ac-hj-np-z02-9]+$', address.lower()):
+            return False
+        return True
     
     # P2SH адреса (начинаются с M)
     elif address.startswith('M'):
@@ -563,15 +568,10 @@ async def monitor_unconfirmed_transactions():
             # Получаем все ожидающие транзакции
             async with db_connection() as conn:
                 pending_txs = await conn.fetch(
-                    "SELECT * FROM transactions WHERE status = 'pending'"
-                )
+                    "SELECT * FROM transactions WHERE status = 'pending' AND crypto_amount IS NOT NULL"
+                )  # Добавлено условие crypto_amount IS NOT NULL
             
             for tx in pending_txs:
-                # Проверяем, что crypto_amount не None
-                if tx['crypto_amount'] is None:
-                    logger.error(f"Transaction {tx['order_id']} has None crypto_amount. Skipping.")
-                    continue
-                    
                 # Проверяем статус каждой транзакции
                 tx_check = await check_ltc_transaction_enhanced(
                     tx['crypto_address'], 

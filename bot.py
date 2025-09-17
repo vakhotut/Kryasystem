@@ -38,8 +38,8 @@ from db import (
     add_generated_address, update_address_balance, get_deposit_address, create_deposit, update_deposit_confirmations
 )
 from ltc_hdwallet import ltc_wallet
-from api import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats, monitor_deposits
-from api import check_ltc_transaction_enhanced, validate_ltc_address, log_transaction_event
+from apispace import get_ltc_usd_rate, check_ltc_transaction, get_key_usage_stats, monitor_deposits
+from apispace import check_ltc_transaction_enhanced, validate_ltc_address, log_transaction_event, get_cached_rate, start_deposit_monitoring
 
 # Импортируем сцены и состояния
 from scene import Form, TEXTS, create_language_keyboard, create_main_menu_keyboard, create_balance_menu_keyboard, create_topup_currency_keyboard, create_category_keyboard, create_products_keyboard, create_districts_keyboard, create_delivery_types_keyboard, create_confirmation_keyboard, create_payment_keyboard, create_invoice_keyboard, create_order_history_keyboard, create_order_details_keyboard, create_deposit_address_keyboard, get_text, get_bot_setting
@@ -323,7 +323,7 @@ async def get_ltc_usd_rate_cached():
         LAST_RATE_UPDATE = current_time
         return rate
     
-    from api import get_cached_rate
+    # Используем функцию из apispace.py
     cached_rate, from_cache = await get_cached_rate()
     if from_cache:
         return cached_rate
@@ -401,7 +401,7 @@ async def check_pending_transactions_loop():
 async def get_confirmations_count(txid: str) -> int:
     """Получить количество подтверждений транзакции по её txid"""
     try:
-        from api import get_address_transactions
+        from apispace import get_address_transactions
         # Найдем адрес по txid из таблицы deposits
         async with db_connection() as conn:
             deposit = await conn.fetchrow("SELECT address FROM deposits WHERE txid = $1", txid)
@@ -1088,7 +1088,7 @@ async def check_deposit_status(callback: types.CallbackQuery, state: FSMContext)
             return
             
         # Проверяем транзакции для этого адреса
-        from api import get_address_transactions
+        from apispace import get_address_transactions
         transactions = await get_address_transactions(address)
         
         if not transactions:
@@ -1924,6 +1924,16 @@ def handle_sigterm():
     logger.info("Received SIGTERM signal, shutting down gracefully...")
     # Остановка всех задач и соединений
 
+async def init_litecoinspace_api():
+    """Инициализация LitecoinSpace API"""
+    # Здесь может быть код инициализации, если он нужен
+    logger.info("LitecoinSpace API initialized")
+
+async def close_litecoinspace_api():
+    """Завершение работы LitecoinSpace API"""
+    # Здесь может быть код завершения, если он нужен
+    logger.info("LitecoinSpace API closed")
+
 async def main():
     if not singleton_check():
         logger.error("Another instance of the bot is already running. Exiting.")
@@ -1946,6 +1956,9 @@ async def main():
         await init_db(DATABASE_URL)
         await load_cache()
         
+        # Инициализация LitecoinSpace API
+        await init_litecoinspace_api()
+        
         # Добавьте в начало main() функции:
         port = os.environ.get('PORT', 8000)
         if port:
@@ -1964,7 +1977,6 @@ async def main():
         asyncio.create_task(reset_api_limits_loop())
         
         # Запускаем мониторинг неподтвержденных транзакций
-        from api import start_deposit_monitoring
         start_deposit_monitoring()
         
         while True:
@@ -1985,6 +1997,9 @@ async def main():
                 
     except Exception as e:
         logger.exception("Failed to start bot")
+    finally:
+        # Завершение работы LitecoinSpace API
+        await close_litecoinspace_api()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()

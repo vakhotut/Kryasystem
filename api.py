@@ -13,10 +13,10 @@ import re
 logger = logging.getLogger(__name__)
 
 # Конфигурация API
-MEMPOOL_API_URL = "https://mempool.space/api"
-MEMPOOL_TESTNET_URL = "https://mempool.space/testnet/api"
-LTC_NETWORK = "mainnet"  # или "testnet"
-CONFIRMATIONS_REQUIRED = 3  # Требуемое количество подтверждений
+PRIMARY_API_URL = "https://ltc.bitaps.com"
+FALLBACK_API_URL = "https://api.litecoinspace.org"
+LTC_NETWORK = "mainnet"
+CONFIRMATIONS_REQUIRED = 3
 
 # Кэш для хранения данных о транзакциях
 transaction_cache = {}
@@ -24,11 +24,11 @@ address_cache = {}
 
 # Конфигурация логирования
 payment_logger = logging.getLogger('payment_system')
-payment_logger.setLevel(logging.INFO)
+payment_logger.setLevel(logging.Info)
 
 # Создаем файловый обработчик для детального лога
 file_handler = logging.FileHandler('payment_detailed.log')
-file_handler.setLevel(logging.INFO)
+file_handler.setLevel(logging.Info)
 
 # Создаем форматтер с структурированными данными
 detailed_formatter = logging.Formatter(
@@ -95,10 +95,8 @@ def validate_ltc_address(address: str) -> bool:
     """
     # Bech32 адреса (начинаются с ltc1)
     if address.startswith('ltc1'):
-        # Bech32 адреса обычно имеют длину около 42 символов
         if not (40 <= len(address) <= 62):
             return False
-        # Дополнительная проверка формата Bech32
         if not re.match(r'^ltc1[ac-hj-np-z02-9]+$', address.lower()):
             return False
         return True
@@ -120,148 +118,110 @@ def validate_ltc_address(address: str) -> bool:
 def validate_base58_address(address: str, expected_prefix: str) -> bool:
     """Валидация Base58 адресов с проверкой контрольной суммы"""
     try:
-        # Проверяем префикс
         if not address.startswith(expected_prefix):
             return False
         
-        # Декодируем Base58
         decoded = base58.b58decode(address)
         
-        # Проверяем длину
         if len(decoded) != 25:
             return False
         
-        # Разделяем на payload и checksum
         payload = decoded[:-4]
         checksum = decoded[-4:]
         
-        # Вычисляем проверочную сумму
         first_sha = hashlib.sha256(payload).digest()
         second_sha = hashlib.sha256(first_sha).digest()
         calculated_checksum = second_sha[:4]
         
-        # Сравниваем checksum
         return checksum == calculated_checksum
         
     except Exception:
         return False
 
 async def get_ltc_usd_rate() -> float:
-    """Получение текущего курса LTC к USD"""
+    """Получение курса LTC через BitAPS"""
     try:
         start_time = time.time()
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{MEMPOOL_API_URL}/v1/historical?currency=USD") as response:
+            async with session.get(f"{PRIMARY_API_URL}/market/ticker") as response:
                 if response.status == 200:
                     data = await response.json()
-                    # Получаем последнюю доступную цену
-                    rate = float(data.get('prices', [])[-1][1] if data.get('prices') else 0)
+                    rate = float(data['data']['last'])
                     response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_rate', True, response_time, f"Rate: {rate}")
+                    log_api_request('bitaps_rate', True, response_time, f"Rate: {rate}")
                     return rate
-        response_time = (time.time() - start_time) * 1000
-        log_api_request('mempool_rate', False, response_time, f"Status: {response.status}")
     except Exception as e:
-        logger.error(f"Error getting LTC rate: {e}")
+        logger.error(f"BitAPS rate error: {e}")
         response_time = (time.time() - start_time) * 1000
-        log_api_request('mempool_rate', False, response_time, f"Exception: {str(e)}")
+        log_api_request('bitaps_rate', False, response_time, f"Exception: {str(e)}")
+        
+        # Fallback to litecoinspace.org
+        try:
+            start_time_fallback = time.time()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{FALLBACK_API_URL}/v1/exchange-rates") as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        rate = float(data['rates']['USD'])
+                        response_time = (time.time() - start_time_fallback) * 1000
+                        log_api_request('litecoinspace_rate', True, response_time, f"Rate: {rate}")
+                        return rate
+        except Exception as fallback_error:
+            logger.error(f"Litecoinspace rate error: {fallback_error}")
+            response_time = (time.time() - start_time_fallback) * 1000
+            log_api_request('litecoinspace_rate', False, response_time, f"Exception: {str(fallback_error)}")
     
-    # Возвращаем значение по умолчанию в случае ошибки
-    return 65.0  # Примерное значение
+    return 65.0  # Fallback value
 
 async def get_address_transactions(address: str) -> List[Dict]:
-    """Получение транзакций для адреса из mempool.space"""
+    """Получение транзакций адреса через BitAPS"""
     try:
         start_time = time.time()
         
-        # Валидация адреса перед запросом
         if not validate_ltc_address(address):
             log_address_validation(address, False, "API request blocked")
             return []
             
         log_address_validation(address, True, "API request")
         
-        base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{base_url}/address/{address}/txs") as response:
+            async with session.get(f"{PRIMARY_API_URL}/address/{address}") as response:
                 if response.status == 200:
-                    transactions = await response.json()
+                    data = await response.json()
+                    transactions = data.get('data', {}).get('transactions', [])
                     response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_address_txs', True, response_time, 
+                    log_api_request('bitaps_address_txs', True, response_time, 
                                   f"Found {len(transactions)} transactions")
                     return transactions
-                else:
-                    logger.error(f"Error getting transactions for address {address}: {response.status}")
-                    response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_address_txs', False, response_time, 
-                                  f"Status: {response.status}")
-                    return []
     except Exception as e:
-        logger.error(f"Error in get_address_transactions for {address}: {e}")
+        logger.error(f"BitAPS address error: {e}")
         response_time = (time.time() - start_time) * 1000
-        log_api_request('mempool_address_txs', False, response_time, f"Exception: {str(e)}")
-        return []
-
-async def get_transaction(txid: str) -> Optional[Dict]:
-    """Получение информации о конкретной транзакции"""
-    try:
-        start_time = time.time()
-        base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{base_url}/tx/{txid}") as response:
-                if response.status == 200:
-                    transaction = await response.json()
-                    response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_tx', True, response_time, f"TX: {txid}")
-                    return transaction
-                else:
-                    logger.error(f"Error getting transaction {txid}: {response.status}")
-                    response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_tx', False, response_time, f"Status: {response.status}")
-                    return None
-    except Exception as e:
-        logger.error(f"Error in get_transaction for {txid}: {e}")
-        response_time = (time.time() - start_time) * 1000
-        log_api_request('mempool_tx', False, response_time, f"Exception: {str(e)}")
-        return None
-
-async def check_unconfirmed_transactions(address: str) -> List[Dict]:
-    """Проверка неподтвержденных транзакций через Mempool.space API"""
-    try:
-        start_time = time.time()
+        log_api_request('bitaps_address_txs', False, response_time, f"Exception: {str(e)}")
         
-        # Валидация адреса перед запросом
-        if not validate_ltc_address(address):
-            return []
-            
-        base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{base_url}/address/{address}/txs/mempool") as response:
-                if response.status == 200:
-                    transactions = await response.json()
-                    response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_unconfirmed', True, response_time, 
-                                  f"Found {len(transactions)} unconfirmed transactions")
-                    return transactions
-                return []
-    except Exception as e:
-        logger.error(f"Error checking unconfirmed transactions for {address}: {e}")
-        response_time = (time.time() - start_time) * 1000
-        log_api_request('mempool_unconfirmed', False, response_time, f"Exception: {str(e)}")
-        return []
+        # Fallback to litecoinspace.org
+        try:
+            start_time_fallback = time.time()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{FALLBACK_API_URL}/v1/address/{address}/transactions") as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        transactions = data.get('transactions', [])
+                        response_time = (time.time() - start_time_fallback) * 1000
+                        log_api_request('litecoinspace_address_txs', True, response_time, 
+                                      f"Found {len(transactions)} transactions")
+                        return transactions
+        except Exception as fallback_error:
+            logger.error(f"Litecoinspace address error: {fallback_error}")
+            response_time = (time.time() - start_time_fallback) * 1000
+            log_api_request('litecoinspace_address_txs', False, response_time, f"Exception: {str(fallback_error)}")
+    
+    return []
 
 async def check_ltc_transaction_enhanced(address: str, expected_amount: float) -> Dict[str, Any]:
-    """
-    Улучшенная проверка транзакций с учетом неподтвержденных
-    Возвращает детальную информацию о статусе транзакции
-    """
+    """Улучшенная проверка транзакций через BitAPS"""
     try:
         start_time = time.time()
-        
-        # Проверяем подтвержденные транзакции
-        confirmed_txs = await get_address_transactions(address)
-        # Проверяем неподтвержденные транзакции
-        unconfirmed_txs = await check_unconfirmed_transactions(address)
+        transactions = await get_address_transactions(address)
         
         result = {
             'confirmed': False,
@@ -271,26 +231,17 @@ async def check_ltc_transaction_enhanced(address: str, expected_amount: float) -
             'txids': []
         }
         
-        # Проверяем подтвержденные транзакции
-        for tx in confirmed_txs:
-            for output in tx.get('vout', []):
-                if 'scriptpubkey_address' in output and output['scriptpubkey_address'] == address:
-                    amount_ltc = output['value'] / 100000000
-                    if abs(amount_ltc - expected_amount) < 0.00000001:
-                        result['confirmed'] = True
-                        result['confirmations'] = await get_confirmations_count(tx['txid'])
-                        result['amount'] = amount_ltc
-                        result['txids'].append(tx['txid'])
-        
-        # Проверяем неподтвержденные транзакции
-        for tx in unconfirmed_txs:
-            for output in tx.get('vout', []):
-                if 'scriptpubkey_address' in output and output['scriptpubkey_address'] == address:
-                    amount_ltc = output['value'] / 100000000
-                    if abs(amount_ltc - expected_amount) < 0.00000001:
-                        result['unconfirmed'] = True
-                        result['amount'] = amount_ltc
-                        result['txids'].append(tx['txid'])
+        for tx in transactions:
+            # Принимаем любую положительную сумму
+            if tx.get('amount', 0) > 0:
+                amount_ltc = tx['amount'] / 100000000  # Конвертация из сатоши
+                if abs(amount_ltc - expected_amount) < 0.00000001:
+                    result['unconfirmed'] = not tx.get('confirmed', False)
+                    result['confirmed'] = tx.get('confirmed', False)
+                    result['confirmations'] = tx.get('confirmations', 0)
+                    result['amount'] = amount_ltc
+                    result['txids'].append(tx['txid'])
+                    break
         
         response_time = (time.time() - start_time) * 1000
         log_api_request('enhanced_check', True, response_time, 
@@ -299,7 +250,7 @@ async def check_ltc_transaction_enhanced(address: str, expected_amount: float) -
         return result
         
     except Exception as e:
-        logger.error(f"Error in enhanced LTC transaction check for {address}: {e}")
+        logger.error(f"Error in enhanced LTC transaction check: {e}")
         response_time = (time.time() - start_time) * 1000
         log_api_request('enhanced_check', False, response_time, f"Exception: {str(e)}")
         return {
@@ -322,100 +273,11 @@ async def check_ltc_transaction(address: str, expected_amount: float) -> bool:
         logger.error(f"Error checking LTC transaction for address {address}: {e}")
         return False
 
-async def get_confirmations_count(txid: str) -> int:
-    """Получение количества подтверждений для транзакции"""
-    try:
-        tx = await get_transaction(txid)
-        if tx and tx['status']['confirmed']:
-            # Для подтвержденных транзакций получаем количество подтверждений
-            best_block_height = await get_best_block_height()
-            if best_block_height:
-                return best_block_height - tx['status']['block_height'] + 1
-        return 0
-    except Exception as e:
-        logger.error(f"Error getting confirmations for tx {txid}: {e}")
-        return 0
-
-async def get_best_block_height() -> Optional[int]:
-    """Получение высоты последнего блока"""
-    try:
-        start_time = time.time()
-        base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{base_url}/blocks/tip/height") as response:
-                if response.status == 200:
-                    height = int(await response.text())
-                    response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_height', True, response_time, f"Height: {height}")
-                    return height
-                else:
-                    logger.error(f"Error getting best block height: {response.status}")
-                    response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_height', False, response_time, f"Status: {response.status}")
-                    return None
-    except Exception as e:
-        logger.error(f"Error in get_best_block_height: {e}")
-        response_time = (time.time() - start_time) * 1000
-        log_api_request('mempool_height', False, response_time, f"Exception: {str(e)}")
-        return None
-
-async def monitor_deposits():
-    """Фоновая задача для мониторинга депозитов на всех отслеживаемых адресах"""
-    while True:
-        try:
-            # Получаем все адреса из базы данных
-            addresses = await get_all_tracked_addresses()
-            
-            for address_data in addresses:
-                address = address_data['address']
-                user_id = address_data['user_id']
-                expected_amount = address_data.get('expected_amount', 0)
-                
-                # Проверяем транзакции для этого адреса
-                transactions = await get_address_transactions(address)
-                
-                for tx in transactions:
-                    txid = tx['txid']
-                    
-                    # Проверяем, не обрабатывали ли мы уже эту транзакцию
-                    if await is_transaction_processed(txid):
-                        continue
-                    
-                    # Ищем выходы на наш адрес
-                    for output in tx.get('vout', []):
-                        if 'scriptpubkey_address' in output and output['scriptpubkey_address'] == address:
-                            amount_ltc = output['value'] / 100000000  # Конвертация из сатоши
-                            
-                            # Если сумма соответствует ожидаемой или мы отслеживаем все поступления
-                            if expected_amount == 0 or abs(amount_ltc - expected_amount) < 0.00000001:
-                                # Регистрируем депозит
-                                confirmations = await get_confirmations_count(txid)
-                                status = 'confirmed' if confirmations >= CONFIRMATIONS_REQUIRED else 'pending'
-                                
-                                await register_deposit(
-                                    txid=txid,
-                                    address=address,
-                                    user_id=user_id,
-                                    amount_ltc=amount_ltc,
-                                    confirmations=confirmations,
-                                    status=status
-                                )
-                                
-                                # Если транзакция подтверждена, зачисляем средства
-                                if status == 'confirmed':
-                                    await process_confirmed_deposit(txid, user_id, amount_ltc)
-            
-            # Ждем перед следующей проверкой
-            await asyncio.sleep(300)  # 5 минут
-        except Exception as e:
-            logger.error(f"Error in monitor_deposits: {e}")
-            await asyncio.sleep(60)  # Ждем 1 минуту при ошибке
-
 async def get_all_tracked_addresses():
-    """Получение всех отслеживаемых адресов из базы данных"""
+    """Получение всех отслеживаемых адресов"""
     try:
         async with db_connection() as conn:
-            return await conn.fetch("SELECT * FROM generated_addresses WHERE balance = 0 OR balance IS NULL")
+            return await conn.fetch("SELECT * FROM generated_addresses WHERE user_id IS NOT NULL")
     except Exception as e:
         logger.error(f"Error getting tracked addresses: {e}")
         return []
@@ -434,7 +296,6 @@ async def register_deposit(txid: str, address: str, user_id: int, amount_ltc: fl
     """Регистрация депозита в базе данных"""
     try:
         async with db_connection() as conn:
-            # Получаем курс LTC для конвертации в USD
             ltc_rate = await get_ltc_usd_rate()
             amount_usd = amount_ltc * ltc_rate
             
@@ -446,8 +307,7 @@ async def register_deposit(txid: str, address: str, user_id: int, amount_ltc: fl
                 status = EXCLUDED.status
             ''', txid, address, user_id, amount_ltc, amount_usd, confirmations, status)
             
-            # Обновляем баланс адреса
-            await update_address_balance(address, amount_ltc, 1)  # 1 транзакция
+            await update_address_balance(address, amount_ltc, 1)
             
             log_transaction_event(
                 txid, address, amount_ltc, 
@@ -468,18 +328,15 @@ async def process_confirmed_deposit(txid: str, user_id: int, amount_ltc: float):
     """Обработка подтвержденного депозита - зачисление средств на баланс пользователя"""
     try:
         async with db_connection() as conn:
-            # Получаем информацию о депозите
             deposit = await conn.fetchrow("SELECT * FROM deposits WHERE txid = $1", txid)
             if not deposit:
                 return
             
-            # Зачисляем средства на баланс пользователя
             await conn.execute(
                 "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
                 deposit['amount_usd'], user_id
             )
             
-            # Обновляем статус депозита
             await conn.execute(
                 "UPDATE deposits SET status = 'processed' WHERE txid = $1",
                 txid
@@ -492,7 +349,6 @@ async def process_confirmed_deposit(txid: str, user_id: int, amount_ltc: float):
                 "INFO"
             )
             
-            # Отправляем уведомление пользователю
             try:
                 from bot import bot
                 user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
@@ -517,42 +373,121 @@ async def process_confirmed_deposit(txid: str, user_id: int, amount_ltc: float):
             "ERROR"
         )
 
+async def monitor_deposits():
+    """Мониторинг депозитов на всех адресах"""
+    while True:
+        try:
+            addresses = await get_all_tracked_addresses()
+            
+            for addr in addresses:
+                transactions = await get_address_transactions(addr['address'])
+                
+                for tx in transactions:
+                    if await is_transaction_processed(tx['txid']):
+                        continue
+                    
+                    # Регистрируем любую положительную сумму
+                    if tx.get('amount', 0) > 0:
+                        amount_ltc = tx['amount'] / 100000000  # Конвертация из сатоши
+                        confirmations = tx.get('confirmations', 0)
+                        status = 'confirmed' if confirmations >= CONFIRMATIONS_REQUIRED else 'pending'
+                        
+                        await register_deposit(
+                            txid=tx['txid'],
+                            address=addr['address'],
+                            user_id=addr['user_id'],
+                            amount_ltc=amount_ltc,
+                            confirmations=confirmations,
+                            status=status
+                        )
+            
+            await asyncio.sleep(300)
+        except Exception as e:
+            logger.error(f"Error in monitor_deposits: {e}")
+            await asyncio.sleep(60)
+
+async def confirm_pending_deposits():
+    """Подтверждение ожидающих депозитов"""
+    while True:
+        try:
+            async with db_connection() as conn:
+                pending_deposits = await conn.fetch(
+                    "SELECT * FROM deposits WHERE status = 'pending'"
+                )
+                
+                for deposit in pending_deposits:
+                    # Получаем актуальное количество подтверждений
+                    transactions = await get_address_transactions(deposit['address'])
+                    confirmations = 0
+                    
+                    for tx in transactions:
+                        if tx['txid'] == deposit['txid']:
+                            confirmations = tx.get('confirmations', 0)
+                            break
+                    
+                    if confirmations >= CONFIRMATIONS_REQUIRED:
+                        await conn.execute(
+                            "UPDATE deposits SET status = 'confirmed', confirmations = $1 WHERE txid = $2",
+                            confirmations, deposit['txid']
+                        )
+                        await process_confirmed_deposit(deposit['txid'], deposit['user_id'], deposit['amount_ltc'])
+            
+            await asyncio.sleep(300)
+        except Exception as e:
+            logger.error(f"Error in confirm_pending_deposits: {e}")
+            await asyncio.sleep(60)
+
 async def get_address_balance(address: str) -> Tuple[float, int]:
     """
-    Получение баланса и количества транзакций для адреса
+    Получение баланса и количества транзакций для адреса через BitAPS
     Возвращает (balance, transaction_count)
     """
     try:
         start_time = time.time()
-        base_url = MEMPOOL_API_URL if LTC_NETWORK == "mainnet" else MEMPOOL_TESTNET_URL
+        
+        if not validate_ltc_address(address):
+            return 0, 0
+            
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{base_url}/address/{address}") as response:
+            async with session.get(f"{PRIMARY_API_URL}/address/{address}") as response:
                 if response.status == 200:
                     data = await response.json()
-                    balance = data['chain_stats']['funded_txo_sum'] - data['chain_stats']['spent_txo_sum']
-                    balance_ltc = balance / 100000000  # Конвертация из сатоши
-                    tx_count = data['chain_stats']['tx_count'] + data['mempool_stats']['tx_count']
+                    balance = data['data']['balance'] / 100000000  # Конвертация из сатоши
+                    tx_count = data['data']['tx_count']
                     response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_balance', True, response_time, 
-                                  f"Balance: {balance_ltc}, TX count: {tx_count}")
-                    return balance_ltc, tx_count
-                else:
-                    logger.error(f"Error getting address balance for {address}: {response.status}")
-                    response_time = (time.time() - start_time) * 1000
-                    log_api_request('mempool_balance', False, response_time, f"Status: {response.status}")
-                    return 0, 0
+                    log_api_request('bitaps_balance', True, response_time, 
+                                  f"Balance: {balance}, TX count: {tx_count}")
+                    return balance, tx_count
     except Exception as e:
-        logger.error(f"Error in get_address_balance for {address}: {e}")
+        logger.error(f"BitAPS balance error: {e}")
         response_time = (time.time() - start_time) * 1000
-        log_api_request('mempool_balance', False, response_time, f"Exception: {str(e)}")
-        return 0, 0
+        log_api_request('bitaps_balance', False, response_time, f"Exception: {str(e)}")
+        
+        # Fallback to litecoinspace.org
+        try:
+            start_time_fallback = time.time()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{FALLBACK_API_URL}/v1/address/{address}") as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        balance = data['balance'] / 100000000  # Конвертация из сатоши
+                        tx_count = data['tx_count']
+                        response_time = (time.time() - start_time_fallback) * 1000
+                        log_api_request('litecoinspace_balance', True, response_time, 
+                                      f"Balance: {balance}, TX count: {tx_count}")
+                        return balance, tx_count
+        except Exception as fallback_error:
+            logger.error(f"Litecoinspace balance error: {fallback_error}")
+            response_time = (time.time() - start_time_fallback) * 1000
+            log_api_request('litecoinspace_balance', False, response_time, f"Exception: {str(fallback_error)}")
+    
+    return 0, 0
 
 async def get_key_usage_stats() -> Dict[str, any]:
     """Получение статистики использования API ключей"""
-    # В данной реализации мы не используем API ключи для mempool.space,
-    # но функция оставлена для совместимости
+    # BitAPS не требует API ключей для базового использования
     return {
-        "mempool": {
+        "bitaps": {
             "total_requests": 0,
             "successful_requests": 0,
             "last_used": datetime.now().isoformat(),
@@ -561,67 +496,8 @@ async def get_key_usage_stats() -> Dict[str, any]:
         }
     }
 
-async def monitor_unconfirmed_transactions():
-    """Фоновая задача для мониторинга неподтвержденных транзакций"""
-    while True:
-        try:
-            # Получаем все ожидающие транзакции
-            async with db_connection() as conn:
-                pending_txs = await conn.fetch(
-                    "SELECT * FROM transactions WHERE status = 'pending' AND crypto_amount IS NOT NULL"
-                )  # Добавлено условие crypto_amount IS NOT NULL
-            
-            for tx in pending_txs:
-                # Проверяем статус каждой транзакции
-                tx_check = await check_ltc_transaction_enhanced(
-                    tx['crypto_address'], 
-                    float(tx['crypto_amount'])
-                )
-                
-                if tx_check['confirmed'] and tx_check['confirmations'] >= CONFIRMATIONS_REQUIRED:
-                    # Транзакция подтверждена
-                    await update_transaction_status(tx['order_id'], 'completed')
-                    await process_successful_payment(tx)
-                    
-                    log_transaction_event(
-                        tx['order_id'], tx['crypto_address'],
-                        float(tx['crypto_amount']), 
-                        "CONFIRMED", 
-                        f"Transaction confirmed via monitoring with {tx_check['confirmations']} confirmations", 
-                        "INFO"
-                    )
-                    
-                elif tx_check['unconfirmed']:
-                    # Транзакция все еще в mempool
-                    log_transaction_event(
-                        tx['order_id'], tx['crypto_address'],
-                        float(tx['crypto_amount']), 
-                        "MONITORED", 
-                        f"Transaction still in mempool with {tx_check.get('confirmations', 0)} confirmations", 
-                        "DEBUG"
-                    )
-                
-                # Если транзакция не найдена ни в блокчейне, ни в mempool,
-                # и прошло больше времени чем ожидалось, помечаем как проблемную
-                elif not tx_check['unconfirmed'] and not tx_check['confirmed']:
-                    created_at = tx['created_at']
-                    if (datetime.now() - created_at).total_seconds() > 3600:  # 1 час
-                        log_transaction_event(
-                            tx['order_id'], tx['crypto_address'],
-                            float(tx['crypto_amount']), 
-                            "STALE", 
-                            "Transaction not found in blockchain or mempool for over 1 hour", 
-                            "WARNING"
-                        )
-            
-            await asyncio.sleep(300)  # Проверяем каждые 5 минут
-            
-        except Exception as e:
-            logger.exception("Error in unconfirmed transactions monitoring")
-            await asyncio.sleep(60)
-
-# Запуск фоновой задачи мониторинга
+# Запуск фоновых задач мониторинга
 def start_deposit_monitoring():
-    """Запуск задачи мониторинга депозитов"""
+    """Запуск задач мониторинга депозитов"""
     asyncio.create_task(monitor_deposits())
-    asyncio.create_task(monitor_unconfirmed_transactions())
+    asyncio.create_task(confirm_pending_deposits())

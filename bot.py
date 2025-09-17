@@ -16,7 +16,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardButton, InputFile
+from aiogram.types import InlineKeyboardButton, BufferedInputFile
 from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter, TelegramBadRequest, TelegramNetworkError
 import aiohttp
 from aiohttp import web
@@ -119,7 +119,7 @@ def generate_captcha_image(text):
 def singleton_check():
     try:
         test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        test_socket.bind(("127.0.0.1", 17891))
+        test_socket.bind("127.0.0.1", 17891)
         test_socket.close()
         return True
     except socket.error:
@@ -524,7 +524,8 @@ async def cleanup_invalid_addresses():
     async with db_connection() as conn:
         addresses = await conn.fetch("SELECT address FROM generated_addresses")
         for addr in addresses:
-            if not validate_ltc_address(addr['address']):
+            # ИСПРАВЛЕНИЕ: добавлен await перед validate_ltc_address
+            if not await validate_ltc_address(addr['address']):
                 logger.warning(f"Removing invalid address: {addr['address']}")
                 await conn.execute("DELETE FROM generated_addresses WHERE address = $1", addr['address'])
 
@@ -582,7 +583,8 @@ async def process_language(callback: types.CallbackQuery, state: FSMContext):
         captcha_image = generate_captcha_image(captcha_code)
         
         try:
-            input_file = InputFile(captcha_image, filename="captcha.png")
+            # ИСПРАВЛЕНИЕ: используем BufferedInputFile вместо InputFile
+            input_file = BufferedInputFile(captcha_image.getvalue(), filename="captcha.png")
             await callback.message.answer_photo(
                 photo=input_file,
                 caption=get_cached_text(lang_code, 'captcha_enter')
@@ -1041,8 +1043,10 @@ async def process_topup_amount(message: types.Message, state: FSMContext):
             )
             
             try:
+                # ИСПРАВЛЕНИЕ: используем BufferedInputFile для QR-кода
+                photo = BufferedInputFile(qr_code, filename="qr.png")
                 await message.answer_photo(
-                    photo=qr_code,
+                    photo=photo,
                     caption=payment_text,
                     reply_markup=create_invoice_keyboard(),
                     parse_mode='Markdown'
@@ -1380,7 +1384,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
         lang = user_data['language'] or 'ru'
         data = callback.data
         
-        state_data = await state.get_data()
+                state_data = await state.get_data()
         if 'last_message_id' in state_data:
             await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
         
@@ -1693,8 +1697,10 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             )
             
             try:
+                # ИСПРАВЛЕНИЕ: используем BufferedInputFile для QR-кода
+                photo = BufferedInputFile(qr_code, filename="qr.png")
                 await callback.message.answer_photo(
-                    photo=qr_code,
+                    photo=photo,
                     caption=payment_text,
                     reply_markup=create_invoice_keyboard(),
                     parse_mode='Markdown'

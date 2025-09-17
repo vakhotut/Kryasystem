@@ -209,106 +209,6 @@ async def show_menu_with_image(message, caption, keyboard, image_url, state):
         await state.update_data(last_message_id=sent_message.message_id)
         return sent_message
 
-async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
-    global invoice_notifications
-    
-    if user_id in invoice_notifications:
-        invoice_notifications[user_id].cancel()
-        del invoice_notifications[user_id]
-    
-    async def notify():
-        try:
-            while True:
-                try:
-                    async with db_connection() as conn:
-                        invoice = await conn.fetchrow(
-                            "SELECT * FROM transactions WHERE order_id = $1 AND status = 'pending'",
-                            order_id
-                        )
-                        
-                        if not invoice or invoice['expires_at'] <= datetime.now():
-                            break
-                        
-                        time_left = invoice['expires_at'] - datetime.now()
-                        minutes_left = int(time_left.total_seconds() // 60)
-                        
-                        if minutes_left > 0 and minutes_left % 5 == 0:
-                            try:
-                                if "Пополнение баланса" in invoice['product_info']:
-                                    notification_text = get_cached_text(lang, 'balance_invoice_time_left', time_left=f"{minutes_left} минут")
-                                else:
-                                    notification_text = get_cached_text(lang, 'invoice_time_left', time_left=f"{minutes_left} минут")
-                                    
-                                await safe_send_message(user_id, notification_text)
-                            except Exception as e:
-                                logger.exception("Error sending notification")
-                        
-                        await asyncio.sleep(60)
-                    
-                    if invoice and invoice['expires_at'] <= datetime.now():
-                        async with db_connection() as conn:
-                            await conn.execute(
-                                "UPDATE transactions SET status = 'expired' WHERE order_id = $1",
-                                order_id
-                            )
-                            
-                            if invoice and invoice.get('product_id') and "Пополнение баланса" not in invoice['product_info']:
-                                await release_product(invoice['product_id'])
-                                logger.info(f"Product {invoice['product_id']} released due to expiration")
-                            
-                            user = await conn.fetchrow(
-                                "SELECT * FROM users WHERE user_id = $1", user_id
-                            )
-                            new_failed = (user['failed_payments'] or 0) + 1
-                            await conn.execute(
-                                "UPDATE users SET failed_payments = $1 WHERE user_id = $2",
-                                new_failed, user_id
-                            )
-                            
-                            if new_failed >= 3:
-                                ban_until = datetime.now() + timedelta(hours=24)
-                                await conn.execute(
-                                    "UPDATE users SET ban_until = $1 WHERE user_id = $2",
-                                    ban_until, user_id
-                                )
-                        
-                        try:
-                            user_data = await get_user(user_id)
-                            lang = user_data['language'] or 'ru'
-                            
-                            await safe_send_message(
-                                user_id,
-                                get_cached_text(lang, 'invoice_expired', failed_count=new_failed)
-                            )
-                            
-                            if new_failed == 2:
-                                await safe_send_message(
-                                    user_id,
-                                    get_cached_text(lang, 'almost_banned', remaining=1)
-                                )
-                            elif new_failed >= 3:
-                                await safe_send_message(
-                                    user_id,
-                                    get_cached_text(lang, 'ban_message')
-                                )
-                        except Exception as e:
-                            logger.exception("Error sending expiration message")
-                        
-                        break
-                except Exception as e:
-                    logger.exception("Error in invoice notification loop")
-                    await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            logger.info(f"Invoice notification task for user {user_id} was cancelled")
-        except Exception as e:
-            logger.exception("Error in invoice notification loop")
-        finally:
-            if user_id in invoice_notifications:
-                del invoice_notifications[user_id]
-    
-    task = asyncio.create_task(notify())
-    invoice_notifications[user_id] = task
-
 async def show_balance_menu(callback: types.CallbackQuery, state: FSMContext):
     try:
         user_id = callback.from_user.id
@@ -1593,6 +1493,11 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
         lang = user_data['language'] or 'ru'
         data = callback.data
         
+        # Добавляем проверку для check_invoice
+        if data == "check_invoice":
+            await check_invoice_enhanced(callback, state)
+            return
+            
         state_data = await state.get_data()
         if 'last_message_id' in state_data:
             await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
@@ -1742,7 +1647,7 @@ async def process_crypto_currency(callback: types.CallbackQuery, state: FSMConte
             asyncio.create_task(invoice_notification_loop(user_id, order_id, lang))
             await state.set_state(Form.payment)
         else:
-            await callback.message.answer("Currently only LTC is supported")
+            await callback.message.answer(get_cached_text(lang, 'only_ltc_supported'))
     except Exception as e:
         logger.exception("Error processing crypto currency")
         await callback.answer("Произошла ошибка. Попробуйте позже.")

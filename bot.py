@@ -378,6 +378,10 @@ async def check_pending_transactions_loop():
             transactions = await get_pending_transactions()
             
             for transaction in transactions:
+                # Пропускаем транзакции пополнения баланса
+                if "Пополнение баланса" in transaction['product_info']:
+                    continue
+                    
                 created_at = transaction['created_at']
                 if (datetime.now() - created_at).total_seconds() >= TRANSACTION_CHECK_DELAY:
                     is_paid = await check_ltc_transaction(
@@ -393,6 +397,27 @@ async def check_pending_transactions_loop():
         except Exception as e:
             logger.exception("Error in check_pending_transactions")
             await asyncio.sleep(60)
+
+async def get_confirmations_count(txid: str) -> int:
+    """Получить количество подтверждений транзакции по её txid"""
+    try:
+        from api import get_address_transactions
+        # Найдем адрес по txid из таблицы deposits
+        async with db_connection() as conn:
+            deposit = await conn.fetchrow("SELECT address FROM deposits WHERE txid = $1", txid)
+            if not deposit:
+                return 0
+            address = deposit['address']
+        
+        # Получим все транзакции для этого адреса
+        transactions = await get_address_transactions(address)
+        for tx in transactions:
+            if tx.get('txid') == txid:
+                return tx.get('confirmations', 0)
+        return 0
+    except Exception as e:
+        logger.exception(f"Error getting confirmations for txid {txid}")
+        return 0
 
 async def process_successful_payment(transaction):
     try:
@@ -983,6 +1008,7 @@ async def process_topup_amount(message: types.Message, state: FSMContext):
             order_id = f"topup_{int(time.time())}_{user_id}"
             expires_at = datetime.now() + timedelta(minutes=30)
             
+            # ИЗМЕНЕНИЕ: убрали сумму из product_info
             await add_transaction(
                 user_id,
                 amount,
@@ -990,7 +1016,7 @@ async def process_topup_amount(message: types.Message, state: FSMContext):
                 order_id,
                 None,  # QR-код будет сгенерирован позже
                 expires_at,
-                f"Пополнение баланса на {amount}$",
+                "Пополнение баланса",  # Было: f"Пополнение баланса на {amount}$"
                 order_id,
                 address,
                 amount_ltc
@@ -1087,6 +1113,7 @@ async def check_deposit_status(callback: types.CallbackQuery, state: FSMContext)
                 )
                 return
             elif deposit['status'] == 'pending':
+                # ИСПРАВЛЕНИЕ: используем новую функцию для получения подтверждений
                 confirmations = await get_confirmations_count(deposit['txid'])
                 await callback.message.answer(
                     f"⏳ Депозит в обработке: {confirmations}/{CONFIRMATIONS_REQUIRED} подтверждений\n"
@@ -1935,7 +1962,6 @@ async def main():
         
         asyncio.create_task(check_pending_transactions_loop())
         asyncio.create_task(reset_api_limits_loop())
-        asyncio.create_task(monitor_deposits())
         
         # Запускаем мониторинг неподтвержденных транзакций
         from api import start_deposit_monitoring

@@ -276,7 +276,21 @@ async def check_ltc_transaction(address: str, expected_amount: float) -> bool:
 async def get_all_tracked_addresses():
     """Получение всех отслеживаемых адресов"""
     try:
+        # Сначала проверяем существование столбца user_id
         async with db_connection() as conn:
+            # Проверяем наличие столбца
+            column_exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'generated_addresses' 
+                    AND column_name = 'user_id'
+                )
+            """)
+            
+            if not column_exists:
+                return []
+                
             return await conn.fetch("SELECT * FROM generated_addresses WHERE user_id IS NOT NULL")
     except Exception as e:
         logger.error(f"Error getting tracked addresses: {e}")

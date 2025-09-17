@@ -5,6 +5,9 @@ from typing import Dict, List, Any, Optional, Tuple
 import time
 import contextlib
 from .connection import db_pool
+import traceback
+import uuid
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +157,7 @@ async def db_execute(query, *args, timeout=2.0):
             if duration > timeout:
                 logger.warning(f"Slow query executed in {duration:.2f}s: {query}")
             return result
-    except asyncpg.PostgresError as e:
+    except Exception as e:
         logger.error(f"Database error in query '{query}': {e}")
         raise
     except Exception as e:
@@ -212,13 +215,11 @@ async def update_user(user_id, **kwargs):
 
 async def add_transaction(user_id, amount, currency, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address=None, crypto_amount=None, product_id=None):
     try:
-        # Преобразуем crypto_amount в строку для сохранения точности
-        crypto_amount_str = str(crypto_amount) if crypto_amount is not None else None
-        
+        # УБРАНО преобразование в строку - оставляем как число
         await db_execute('''
         INSERT INTO transactions (user_id, amount, currency, status, order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount, product_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount_str, product_id)
+        ''', user_id, amount, currency, 'pending', order_id, payment_url, expires_at, product_info, invoice_uuid, crypto_address, crypto_amount, product_id)
     except Exception as e:
         logger.error(f"Error adding transaction for user {user_id}: {e}")
 

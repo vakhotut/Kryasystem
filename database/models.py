@@ -152,7 +152,7 @@ async def init_tables():
             )
             ''')
             
-            # Новая таблица для подкатегорий товаров
+            # Новая таблица для подкатегорий товары
             await conn.execute('''
             CREATE TABLE IF NOT EXISTS subcategories (
                 id SERIAL PRIMARY KEY,

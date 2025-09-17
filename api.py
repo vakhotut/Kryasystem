@@ -24,11 +24,11 @@ address_cache = {}
 
 # Конфигурация логирования
 payment_logger = logging.getLogger('payment_system')
-payment_logger.setLevel(logging.Info)
+payment_logger.setLevel(logging.INFO)
 
 # Создаем файловый обработчик для детального лога
 file_handler = logging.FileHandler('payment_detailed.log')
-file_handler.setLevel(logging.Info)
+file_handler.setLevel(logging.INFO)
 
 # Создаем форматтер с структурированными данными
 detailed_formatter = logging.Formatter(

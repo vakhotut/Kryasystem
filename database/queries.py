@@ -589,14 +589,27 @@ async def reset_api_limits():
 async def add_generated_address(address, index, user_id=None, label=None, expected_amount=None):
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO generated_addresses (address, user_id, index, label, expected_amount)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (address) DO UPDATE SET 
-                user_id = EXCLUDED.user_id,
-                label = EXCLUDED.label,
-                expected_amount = EXCLUDED.expected_amount
-            ''', address, user_id, index, label, expected_amount)
+            # Проверяем существование столбца user_id
+            try:
+                await conn.execute("SELECT user_id FROM generated_addresses LIMIT 1")
+                # Если столбец существует, используем полный запрос
+                await conn.execute('''
+                    INSERT INTO generated_addresses (address, user_id, index, label, expected_amount)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (address) DO UPDATE SET 
+                    user_id = EXCLUDED.user_id,
+                    label = EXCLUDED.label,
+                    expected_amount = EXCLUDED.expected_amount
+                ''', address, user_id, index, label, expected_amount)
+            except Exception:
+                # Если столбца user_id нет, используем упрощенный запрос
+                await conn.execute('''
+                    INSERT INTO generated_addresses (address, index, label, expected_amount)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (address) DO UPDATE SET 
+                    label = EXCLUDED.label,
+                    expected_amount = EXCLUDED.expected_amount
+                ''', address, index, label, expected_amount)
             return True
     except Exception as e:
         logger.error(f"Error adding generated address: {e}")
@@ -618,11 +631,23 @@ async def update_address_balance(address, balance, transaction_count):
 async def get_generated_addresses(limit=50, offset=0):
     try:
         async with db_pool.acquire() as conn:
-            return await conn.fetch('''
-                SELECT * FROM generated_addresses 
-                ORDER BY created_at DESC 
-                LIMIT $1 OFFSET $2
-            ''', limit, offset)
+            # Проверяем существование столбца user_id
+            try:
+                await conn.execute("SELECT user_id FROM generated_addresses LIMIT 1")
+                # Если столбец существует, включаем его в запрос
+                return await conn.fetch('''
+                    SELECT * FROM generated_addresses 
+                    ORDER BY created_at DESC 
+                    LIMIT $1 OFFSET $2
+                ''', limit, offset)
+            except Exception:
+                # Если столбца user_id нет, используем запрос без него
+                return await conn.fetch('''
+                    SELECT address, index, label, expected_amount, balance, transaction_count, created_at 
+                    FROM generated_addresses 
+                    ORDER BY created_at DESC 
+                    LIMIT $1 OFFSET $2
+                ''', limit, offset)
     except Exception as e:
         logger.error(f"Error getting generated addresses: {e}")
         return []
@@ -631,12 +656,19 @@ async def get_deposit_address(user_id):
     """Получение последнего адреса депозита для пользователя"""
     try:
         async with db_pool.acquire() as conn:
-            return await conn.fetchval('''
-                SELECT address FROM generated_addresses 
-                WHERE user_id = $1 
-                ORDER BY created_at DESC 
-                LIMIT 1
-            ''', user_id)
+            # Проверяем существование столбца user_id
+            try:
+                await conn.execute("SELECT user_id FROM generated_addresses LIMIT 1")
+                # Если столбец существует, используем запрос с user_id
+                return await conn.fetchval('''
+                    SELECT address FROM generated_addresses 
+                    WHERE user_id = $1 
+                    ORDER BY created_at DESC 
+                    LIMIT 1
+                ''', user_id)
+            except Exception:
+                # Если столбца user_id нет, возвращаем None
+                return None
     except Exception as e:
         logger.error(f"Error getting deposit address for user {user_id}: {e}")
         return None

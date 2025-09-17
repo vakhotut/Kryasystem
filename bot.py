@@ -332,6 +332,46 @@ async def get_ltc_usd_rate_cached():
     LAST_RATE_UPDATE = current_time
     return rate
 
+async def invoice_notification_loop(user_id: int, order_id: str, lang: str):
+    """Цикл уведомлений о времени жизни инвойса"""
+    try:
+        async with db_connection() as conn:
+            invoice = await conn.fetchrow(
+                "SELECT * FROM transactions WHERE order_id = $1",
+                order_id
+            )
+        
+        if not invoice:
+            return
+            
+        expires_at = invoice['expires_at']
+        notification_intervals = [1800, 900, 300, 60]  # 30, 15, 5, 1 минута в секундах
+        
+        while True:
+            now = datetime.now()
+            if now >= expires_at:
+                break
+                
+            time_left = (expires_at - now).total_seconds()
+            
+            # Проверяем, нужно ли отправить уведомление
+            for interval in notification_intervals:
+                if time_left <= interval:
+                    # Удаляем этот интервал, чтобы не отправлять повторно
+                    notification_intervals.remove(interval)
+                    
+                    time_left_str = f"{int(time_left // 60)} мин {int(time_left % 60)} сек"
+                    await safe_send_message(
+                        user_id,
+                        get_cached_text(lang, 'invoice_time_left', time_left=time_left_str)
+                    )
+                    break
+                    
+            await asyncio.sleep(10)
+            
+    except Exception as e:
+        logger.exception("Error in invoice notification loop")
+
 async def check_pending_transactions_loop():
     while True:
         try:
@@ -1231,7 +1271,6 @@ async def process_delivery(callback: types.CallbackQuery, state: FSMContext):
                 get_cached_text(lang, 'select_district'),
                 create_districts_keyboard(districts),
                 get_bot_setting('district_menu_image'),
-                state
             )
             await state.set_state(Form.district)
             return

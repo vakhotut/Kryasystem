@@ -140,8 +140,8 @@ def validate_base58_address(address: str, expected_prefix: str) -> bool:
 
 async def get_ltc_usd_rate() -> float:
     """Получение курса LTC через BitAPS"""
+    start_time = time.time()
     try:
-        start_time = time.time()
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{PRIMARY_API_URL}/market/ticker") as response:
                 if response.status == 200:
@@ -150,14 +150,16 @@ async def get_ltc_usd_rate() -> float:
                     response_time = (time.time() - start_time) * 1000
                     log_api_request('bitaps_rate', True, response_time, f"Rate: {rate}")
                     return rate
+                else:
+                    raise Exception(f"HTTP status {response.status}")
     except Exception as e:
         logger.error(f"BitAPS rate error: {e}")
         response_time = (time.time() - start_time) * 1000
         log_api_request('bitaps_rate', False, response_time, f"Exception: {str(e)}")
         
         # Fallback to litecoinspace.org
+        start_time_fallback = time.time()
         try:
-            start_time_fallback = time.time()
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{FALLBACK_API_URL}/v1/exchange-rates") as response:
                     if response.status == 200:
@@ -166,6 +168,8 @@ async def get_ltc_usd_rate() -> float:
                         response_time = (time.time() - start_time_fallback) * 1000
                         log_api_request('litecoinspace_rate', True, response_time, f"Rate: {rate}")
                         return rate
+                    else:
+                        raise Exception(f"HTTP status {response.status}")
         except Exception as fallback_error:
             logger.error(f"Litecoinspace rate error: {fallback_error}")
             response_time = (time.time() - start_time_fallback) * 1000
@@ -175,9 +179,8 @@ async def get_ltc_usd_rate() -> float:
 
 async def get_address_transactions(address: str) -> List[Dict]:
     """Получение транзакций адреса через BitAPS"""
+    start_time = time.time()
     try:
-        start_time = time.time()
-        
         if not validate_ltc_address(address):
             log_address_validation(address, False, "API request blocked")
             return []
@@ -193,14 +196,16 @@ async def get_address_transactions(address: str) -> List[Dict]:
                     log_api_request('bitaps_address_txs', True, response_time, 
                                   f"Found {len(transactions)} transactions")
                     return transactions
+                else:
+                    raise Exception(f"HTTP status {response.status}")
     except Exception as e:
         logger.error(f"BitAPS address error: {e}")
         response_time = (time.time() - start_time) * 1000
         log_api_request('bitaps_address_txs', False, response_time, f"Exception: {str(e)}")
         
         # Fallback to litecoinspace.org
+        start_time_fallback = time.time()
         try:
-            start_time_fallback = time.time()
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{FALLBACK_API_URL}/v1/address/{address}/transactions") as response:
                     if response.status == 200:
@@ -210,6 +215,8 @@ async def get_address_transactions(address: str) -> List[Dict]:
                         log_api_request('litecoinspace_address_txs', True, response_time, 
                                       f"Found {len(transactions)} transactions")
                         return transactions
+                    else:
+                        raise Exception(f"HTTP status {response.status}")
         except Exception as fallback_error:
             logger.error(f"Litecoinspace address error: {fallback_error}")
             response_time = (time.time() - start_time_fallback) * 1000
@@ -467,9 +474,8 @@ async def get_address_balance(address: str) -> Tuple[float, int]:
     Получение баланса и количества транзакций для адреса через BitAPS
     Возвращает (balance, transaction_count)
     """
+    start_time = time.time()
     try:
-        start_time = time.time()
-        
         if not validate_ltc_address(address):
             return 0, 0
             
@@ -483,14 +489,16 @@ async def get_address_balance(address: str) -> Tuple[float, int]:
                     log_api_request('bitaps_balance', True, response_time, 
                                   f"Balance: {balance}, TX count: {tx_count}")
                     return balance, tx_count
+                else:
+                    raise Exception(f"HTTP status {response.status}")
     except Exception as e:
         logger.error(f"BitAPS balance error: {e}")
         response_time = (time.time() - start_time) * 1000
         log_api_request('bitaps_balance', False, response_time, f"Exception: {str(e)}")
         
         # Fallback to litecoinspace.org
+        start_time_fallback = time.time()
         try:
-            start_time_fallback = time.time()
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{FALLBACK_API_URL}/v1/address/{address}") as response:
                     if response.status == 200:
@@ -501,7 +509,9 @@ async def get_address_balance(address: str) -> Tuple[float, int]:
                         log_api_request('litecoinspace_balance', True, response_time, 
                                       f"Balance: {balance}, TX count: {tx_count}")
                         return balance, tx_count
-                except Exception as fallback_error:
+                    else:
+                        raise Exception(f"HTTP status {response.status}")
+        except Exception as fallback_error:
             logger.error(f"Litecoinspace balance error: {fallback_error}")
             response_time = (time.time() - start_time_fallback) * 1000
             log_api_request('litecoinspace_balance', False, response_time, f"Exception: {str(fallback_error)}")

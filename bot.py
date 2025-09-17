@@ -1384,7 +1384,7 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
         lang = user_data['language'] or 'ru'
         data = callback.data
         
-                state_data = await state.get_data()
+        state_data = await state.get_data()
         if 'last_message_id' in state_data:
             await safe_delete_previous_message(user_id, state_data['last_message_id'], state)
         
